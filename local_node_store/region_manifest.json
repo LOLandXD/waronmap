@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "active_region": {
+    "id": "new_england_two",
+    "name": "Maine and New Hampshire",
+    "states": ["Maine", "New Hampshire"],
+    "prepared_root": "local_node_store/northern_new_england",
+    "bounds": {
+      "west": -72.6,
+      "south": 42.7,
+      "east": -66.8,
+      "north": 47.6
+    },
+    "overview_bounds": [
+    ],
+    "overview_features": [
+      {
+        "id": "maine",
+        "name": "Maine",
+        "coordinates": [[
+          [-71.10, 43.00],
+          [-70.55, 43.00],
+          [-70.10, 43.20],
+          [-69.70, 43.45],
+          [-69.35, 43.70],
+          [-69.05, 44.05],
+          [-68.75, 44.45],
+          [-68.55, 44.95],
+          [-68.30, 45.35],
+          [-67.95, 45.75],
+          [-67.45, 46.10],
+          [-67.05, 46.55],
+          [-67.00, 47.10],
+          [-67.75, 47.45],
+          [-69.15, 47.45],
+          [-70.20, 46.95],
+          [-70.65, 46.25],
+          [-71.00, 45.50],
+          [-71.10, 44.60],
+          [-71.10, 43.00]
+        ]]
+      },
+      {
+        "id": "new_hampshire",
+        "name": "New Hampshire",
+        "coordinates": [[
+          [-72.56, 42.70],
+          [-70.60, 42.70],
+          [-70.60, 43.10],
+          [-70.70, 43.55],
+          [-70.80, 44.05],
+          [-71.00, 44.45],
+          [-71.35, 44.90],
+          [-71.70, 45.15],
+          [-72.10, 45.30],
+          [-72.56, 45.30],
+          [-72.56, 42.70]
+        ]]
+      }
+    ],
+    "query_bounds": [
+      {
+        "id": "maine_southwest",
+        "west": -71.10,
+        "south": 43.00,
+        "east": -69.80,
+        "north": 44.40
+      },
+      {
+        "id": "maine_central",
+        "west": -70.90,
+        "south": 44.20,
+        "east": -68.60,
+        "north": 45.70
+      },
+      {
+        "id": "maine_north",
+        "west": -70.70,
+        "south": 45.40,
+        "east": -67.00,
+        "north": 47.55
+      },
+      {
+        "id": "maine_downeast",
+        "west": -69.20,
+        "south": 43.70,
+        "east": -66.85,
+        "north": 45.30
+      },
+      {
+        "id": "new_hampshire",
+        "west": -72.60,
+        "south": 42.70,
+        "east": -70.60,
+        "north": 45.35
+      }
+    ],
+    "overview_hide_zoom": 7,
+    "default_zoom": 6.2
+  }
+}

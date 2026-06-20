@@ -1,0 +1,100 @@
+Node Game Specification
+
+Purpose
+- This file describes how the game should work from the player point of view.
+- It is the implementation reference for gameplay, login flow, UI layout, and multiplayer rules.
+
+Core Access Rule
+- The game cannot be played unless the player is logged in.
+- Guests may see the background game world, but they cannot select nodes, create connections, send troops, or interact with the world state.
+
+Start Screen / Cover Screen
+- When a player opens the game, the first thing shown is a centered overlay panel.
+- The overlay panel should not take up the whole screen.
+- The overlay should sit in the middle of the screen and leave the map visible behind it.
+- The overlay should support multiple tabs.
+- Required first tab: Login.
+- Additional tabs may include Register, How To Play, Rules, Updates, or other future content.
+
+Background Behind The Overlay
+- The background behind the centered overlay is the live node game.
+- The camera should automatically open over the most occupied area currently available.
+- "Most occupied" means the area with the highest concentration of player-controlled nodes.
+- If there are not many occupied nodes yet, choose the best currently available cluster.
+- The background should feel active and show that the game world is already running.
+
+Multiplayer Rule
+- Enemy nodes should belong to other real players, not generic red AI nodes.
+- The game should be multiplayer and use shared server state.
+- Multiple players can log in at the same time and play in the same world.
+- Every player should have their own territory color.
+- The game should not rely on a red-versus-green-only color system.
+- Neutral nodes may still use a neutral color, but occupied enemy nodes must use player-specific colors.
+- Existing red enemy nodes should be removed as a default enemy concept.
+
+Node Ownership Colors
+- The logged-in player's own nodes should remain easy to identify immediately.
+- Other players should each have distinct colors so territories can be separated visually.
+- The color system should be stable enough that a player keeps the same visible color during a session and across refreshes when possible.
+
+Required Connection Process
+1. The player clicks the node that will send troops.
+2. The UI tells the player to press Space.
+3. After Space is pressed, the game shows only the nodes that are connectable from that source node.
+4. The player clicks the destination node they want to connect to.
+
+Connectable Node Rule
+- Connectable means the target node is directly adjacent by one road segment.
+- Only truly connectable nodes should light up.
+- Do not highlight distant nodes that are only reachable through a longer chain of roads.
+- Players can connect to any valid adjacent node regardless of ownership.
+- This includes:
+  - their own nodes
+  - enemy player nodes
+  - neutral nodes
+
+Connection Line Behavior
+- When a connection is created, the line must follow the road geometry.
+- If the road curves, the line must curve with it.
+- If the road bends multiple times, the path should follow those bends.
+- The connection line should not be a fake straight shortcut if a curved road path exists.
+
+Persistent Connections
+- A connection line should continue to exist after the destination node is conquered.
+- If an attack captures the node, the same route should remain active and change into a troop transport route.
+- The route should keep sending troops after capture unless the player removes it.
+
+Direction Arrows
+- Connection lines should display arrows that show the direction of troop movement.
+- The arrows should animate so the line visibly looks like troops are moving.
+- Arrow movement speed should be determined by how many troops are being sent per tick.
+- A stronger troop flow should produce faster or more active arrow movement.
+
+Delete Connection Rule
+- Clicking the same connection again should remove it.
+- In practical terms, connecting two times at the same node pair should delete the existing connection line.
+- This should work as a toggle:
+  - first connect creates the route
+  - second connect on the same route removes it
+
+Gameplay Expectations
+- Login is required before active play starts.
+- The opening overlay should guide the player into login or registration.
+- Once logged in, the player can click their nodes, press Space, view valid adjacent targets, and create or remove routes.
+- Combat and transport should both use the same visible road-following path system.
+- Captured routes should convert into transport instead of disappearing.
+
+Visual / UX Expectations
+- The start overlay should look intentional and polished, not like a full-screen block.
+- The live map background should help sell the multiplayer world even before login.
+- Highlighted nodes must be easy to distinguish from non-connectable ones.
+- The moving arrows on routes should make the flow of armies clear at a glance.
+
+Server / Multiplayer Expectations
+- The world should be shared across all players.
+- Enemy ownership should come from other human players in the same server state.
+- Game state updates should remain frequent enough that the multiplayer world feels alive.
+
+Implementation Note
+- This file is a design and behavior specification.
+- When implementation details conflict with this document, update the code so the gameplay matches this specification.

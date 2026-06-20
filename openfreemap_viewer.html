@@ -1,0 +1,2156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Node Game</title>
+  <link href="/vendor/maplibre-gl.css" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; font-family: Arial, Helvetica, sans-serif; }
+    #map { width: 100%; height: 100vh; }
+    .connection-canvas { position: absolute; inset: 0; width: 100%; height: 100vh; z-index: 2; pointer-events: none; }
+    .overlay { position: absolute; z-index: 3; color: #e5eefc; background: rgba(15, 23, 42, 0.90); backdrop-filter: blur(8px); box-shadow: 0 12px 30px rgba(15, 23, 42, 0.25); border-radius: 14px; }
+    .top-bar { top: 16px; left: 50%; transform: translateX(-50%); width: min(520px, calc(100vw - 32px)); padding: 14px 16px; pointer-events: auto; }
+    .top-bar.hidden { display: none; }
+    .panel { top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(420px, calc(100vw - 32px)); max-height: calc(100vh - 56px); overflow-y: auto; padding: 14px 16px; }
+    .panel.hidden { display: none; }
+    .show-panel-button { position: absolute; top: 16px; left: 16px; z-index: 3; display: none; border: 0; border-radius: 8px; padding: 8px 12px; color: #fff; background: rgba(37, 99, 235, 0.96); cursor: pointer; }
+    .show-panel-button.visible { display: inline-flex; }
+    .show-top-bar-button { position: absolute; top: 16px; left: 50%; z-index: 3; display: none; transform: translateX(-50%); border: 0; border-radius: 8px; padding: 8px 12px; color: #fff; background: rgba(37, 99, 235, 0.96); cursor: pointer; }
+    .show-top-bar-button.visible { display: inline-flex; }
+    .node-info { right: 16px; bottom: 16px; width: min(320px, calc(100vw - 32px)); padding: 12px 14px; font-size: 13px; }
+    .node-info.hidden { display: none; }
+    .node-info strong { display: block; margin-bottom: 8px; font-size: 15px; }
+    .node-info .status { margin-top: 6px; }
+    .route-controls { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(148, 163, 184, 0.18); }
+    .route-controls label { display: block; color: #cbd5e1; font-size: 12px; margin-bottom: 4px; }
+    .route-controls .actions { margin-top: 6px; }
+    .route-list { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(148, 163, 184, 0.18); }
+    .route-list.hidden { display: none; }
+    .route-list-title { margin-bottom: 8px; color: #e2e8f0; font-size: 13px; font-weight: 700; }
+    .route-row { display: grid; gap: 6px; padding: 8px 0; border-top: 1px solid rgba(148, 163, 184, 0.12); }
+    .route-row:first-child { border-top: 0; padding-top: 0; }
+    .route-row-top { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+    .route-row-title { color: #f8fafc; font-size: 12px; font-weight: 600; }
+    .route-row-mode { color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .route-row-controls { display: flex; gap: 8px; align-items: center; }
+    .route-row-controls input { margin: 0; width: 86px; }
+    .route-row-controls button { padding: 6px 10px; font-size: 12px; }
+    .hint { font-size: 12px; color: #94a3b8; }
+    .top-bar-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+    .top-bar-header h1 { margin-bottom: 0; }
+    .top-bar-close { flex: 0 0 auto; padding: 6px 10px; font-size: 12px; }
+    h1 { margin: 0 0 8px; font-size: 18px; }
+    p { margin: 0 0 10px; line-height: 1.45; font-size: 14px; }
+    .progress-track { width: 100%; height: 10px; overflow: hidden; border-radius: 999px; background: rgba(148, 163, 184, 0.22); margin-top: 8px; }
+    .progress-fill { width: 0%; height: 100%; border-radius: 999px; background: linear-gradient(90deg, #60a5fa, #2563eb); transition: width 0.18s ease; }
+    .progress-fill.indeterminate { width: 100% !important; background: linear-gradient(90deg, rgba(96,165,250,0.35), rgba(37,99,235,0.95), rgba(96,165,250,0.35)); background-size: 200% 100%; animation: progress-shift 1.4s linear infinite; }
+    .progress-label { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; color: #cbd5e1; }
+    .row, .stat { display: flex; justify-content: space-between; gap: 10px; }
+    .stats { display: grid; gap: 8px; margin: 10px 0; }
+    .status { white-space: pre-wrap; margin-top: 10px; color: #cbd5e1; font-size: 13px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    .section { margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(148, 163, 184, 0.18); }
+    input { width: 100%; margin-top: 6px; margin-bottom: 8px; padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(148, 163, 184, 0.3); background: rgba(15, 23, 42, 0.65); color: #fff; }
+    button { border: 0; border-radius: 8px; padding: 8px 12px; font-weight: 600; color: #fff; background: #2563eb; cursor: pointer; box-shadow: 0 8px 18px rgba(37, 99, 235, 0.24); transition: transform 0.14s ease, box-shadow 0.18s ease, filter 0.18s ease, opacity 0.18s ease; }
+    button:hover { transform: translateY(-1px); filter: brightness(1.06); box-shadow: 0 12px 24px rgba(37, 99, 235, 0.30); }
+    button:active, button.button-press { transform: translateY(1px) scale(0.97); filter: brightness(0.96); box-shadow: 0 4px 10px rgba(15, 23, 42, 0.28); }
+    button:disabled { opacity: 0.6; cursor: wait; transform: none; filter: none; box-shadow: 0 6px 12px rgba(15, 23, 42, 0.16); }
+    button.secondary { background: #334155; }
+    button.secondary:hover { box-shadow: 0 12px 24px rgba(15, 23, 42, 0.28); }
+    @keyframes progress-shift {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <canvas id="connectionCanvas" class="connection-canvas"></canvas>
+  <div class="overlay top-bar" id="topBar">
+    <div class="top-bar-header">
+      <h1>Node Generation Progress</h1>
+      <button id="hideTopBarButton" class="secondary top-bar-close" type="button">Hide</button>
+    </div>
+    <p id="loadingMessage">Preparing nodes for Maine and New Hampshire...</p>
+    <div class="progress-label"><span id="loadingProgressText">0 / 0</span><span id="loadingProgressPercent">0%</span></div>
+    <div class="progress-track"><div id="loadingProgressFill" class="progress-fill"></div></div>
+  </div>
+  <button id="showTopBarButton" class="show-top-bar-button" type="button">Show Progress</button>
+  <div class="overlay panel" id="panel">
+    <h1 id="panelTitle">Maine and New Hampshire Game</h1>
+    <p>White nodes are neutral and start at 10 army. Click one of your green nodes to open its node info panel, then use the adjacent target list there to attack or transfer along a single road.</p>
+    <div class="section">
+      <div id="authSummary" class="status">Register or log in to claim 10 starting nodes.</div>
+      <input id="usernameInput" placeholder="username">
+      <input id="passwordInput" type="password" placeholder="password">
+      <div class="actions">
+        <button id="registerButton" type="button">Register</button>
+        <button id="loginButton" type="button" class="secondary">Login</button>
+        <button id="logoutButton" type="button" class="secondary">Logout</button>
+      </div>
+    </div>
+    <div class="section">
+      <div class="stats">
+        <div class="stat"><span>Region</span><strong id="regionText">Maine, New Hampshire</strong></div>
+        <div class="stat"><span>Build progress</span><strong id="buildProgressInline">0 / 0</strong></div>
+        <div class="stat"><span>Preview nodes</span><strong id="previewNodeCount">0</strong></div>
+        <div class="stat"><span>Rendered nodes</span><strong id="renderedNodeCount">0</strong></div>
+        <div class="stat"><span>Active attacks</span><strong id="activeAttackCount">0</strong></div>
+        <div class="stat"><span>Selected node</span><strong id="selectedNodeText">None</strong></div>
+      </div>
+      <div class="progress-track"><div id="tileProgressFill" class="progress-fill"></div></div>
+      <div id="status" class="status">Waiting for build progress and account session.</div>
+    </div>
+    <div class="section">
+      <div class="actions">
+        <button id="locateNodesButton" type="button">Locate My Nodes</button>
+        <button id="hidePanelButton" type="button" class="secondary">Hide Panel</button>
+      </div>
+    </div>
+  </div>
+  <button id="showPanelButton" class="show-panel-button" type="button">Show Panel</button>
+  <div class="overlay node-info hidden" id="nodeInfo">
+    <strong id="nodeInfoTitle">Node Info</strong>
+    <div class="stats">
+      <div class="stat"><span>Node</span><strong id="nodeInfoId">None</strong></div>
+      <div class="stat"><span>Owner</span><strong id="nodeInfoOwner">No node selected</strong></div>
+      <div class="stat"><span>Army</span><strong id="nodeInfoArmy">0</strong></div>
+      <div class="stat"><span>Net per tick</span><strong id="nodeInfoDelta">0</strong></div>
+      <div class="stat"><span>Position</span><strong id="nodeInfoPosition">-</strong></div>
+    </div>
+    <div class="route-controls">
+      <label for="sendPerTickInput">New connection army per tick</label>
+      <input id="sendPerTickInput" type="number" min="1" max="250" step="1" value="1">
+      <div id="routeInfoHint" class="hint">How to connect: click your node, then use the adjacent target buttons below in this panel.</div>
+      <div class="actions">
+        <button id="updateRouteRateButton" type="button" class="secondary">Update Route Rate</button>
+      </div>
+    </div>
+    <div id="connectionTargetsSection" class="route-list hidden">
+      <div class="route-list-title">Adjacent Targets</div>
+      <div id="connectionTargetsHint" class="hint">Click one of your nodes to load its directly adjacent road targets here.</div>
+      <div id="connectionTargetsList"></div>
+    </div>
+    <div id="nodeRoutesSection" class="route-list hidden">
+      <div class="route-list-title">Army Lines On This Node</div>
+      <div id="nodeRoutesList"></div>
+    </div>
+    <div id="nodeInfoStatus" class="status">Click any visible node to inspect it here.</div>
+  </div>
+  <script src="/vendor/maplibre-gl.js"></script>
+  <script>
+    const REGION_MANIFEST_URL = "/local_node_store/region_manifest.json";
+    const STATE_BOUNDARIES_URL = "/local_node_store/us_state_boundaries.geojson";
+    const BUILD_STATUS_URL = "/api/build-status";
+    const GAME_STATE_URL = "/api/game-state";
+    const NODE_TILE_URL = "/api/node-tile";
+    const CONNECTABLE_NODES_URL = "/api/connectable-nodes";
+    const CONNECTION_PREVIEW_URL = "/api/connection-preview";
+    const CONNECTION_RATE_URL = "/api/connection-rate";
+    const CONNECTION_REMOVE_URL = "/api/connection-remove";
+    const REGISTER_URL = "/api/register";
+    const LOGIN_URL = "/api/login";
+    const ATTACK_URL = "/api/attack";
+    const SESSION_KEY = "node-game-session-v1";
+    const LOGIN_FORM_KEY = "node-game-login-form-v1";
+    const PANEL_KEY = "node-game-panel-v1";
+    const TOP_BAR_KEY = "node-game-top-bar-v1";
+    const LAST_BUILD_STATUS_KEY = "node-game-build-status-v1";
+    const LAST_OWNED_VIEW_KEY = "node-game-owned-view-v1";
+    const BUILD_POLL_MS = 3000;
+    const GAME_POLL_MS = 3000;
+    const NETWORK_RETRY_MS = 10 * 60 * 1000;
+    const FETCH_TIMEOUT_MS = 30000;
+    const NODE_MIN_ZOOM = 11.5;
+    const NODE_DATA_ZOOM_OFFSET = 2;
+    const NODE_DATA_MIN_ZOOM = 12;
+    const NODE_DATA_MAX_ZOOM = 14;
+    const MAX_VISIBLE_NODE_TILES = 16;
+    const MAX_CONNECTABLE_CANDIDATES = 1500;
+    const VISIBLE_TILE_REFRESH_COOLDOWN_MS = 5000;
+    const ZOOM_IN_MESSAGE = "Please zoom in to see nodes.";
+    const DEFAULT_SEND_PER_TICK = 1;
+
+    const topBarEl = document.getElementById("topBar");
+    const showTopBarButton = document.getElementById("showTopBarButton");
+    const hideTopBarButton = document.getElementById("hideTopBarButton");
+    const panelEl = document.getElementById("panel");
+    const showPanelButton = document.getElementById("showPanelButton");
+    const hidePanelButton = document.getElementById("hidePanelButton");
+    const locateNodesButton = document.getElementById("locateNodesButton");
+    const usernameInput = document.getElementById("usernameInput");
+    const passwordInput = document.getElementById("passwordInput");
+    const registerButton = document.getElementById("registerButton");
+    const loginButton = document.getElementById("loginButton");
+    const logoutButton = document.getElementById("logoutButton");
+    const authSummaryEl = document.getElementById("authSummary");
+    const loadingMessageEl = document.getElementById("loadingMessage");
+    const loadingProgressTextEl = document.getElementById("loadingProgressText");
+    const loadingProgressPercentEl = document.getElementById("loadingProgressPercent");
+    const loadingProgressFillEl = document.getElementById("loadingProgressFill");
+    const buildProgressInlineEl = document.getElementById("buildProgressInline");
+    const previewNodeCountEl = document.getElementById("previewNodeCount");
+    const renderedNodeCountEl = document.getElementById("renderedNodeCount");
+    const activeAttackCountEl = document.getElementById("activeAttackCount");
+    const selectedNodeTextEl = document.getElementById("selectedNodeText");
+    const statusEl = document.getElementById("status");
+    const tileProgressFillEl = document.getElementById("tileProgressFill");
+    const regionTextEl = document.getElementById("regionText");
+    const panelTitleEl = document.getElementById("panelTitle");
+    const nodeInfoEl = document.getElementById("nodeInfo");
+    const nodeInfoTitleEl = document.getElementById("nodeInfoTitle");
+    const nodeInfoIdEl = document.getElementById("nodeInfoId");
+    const nodeInfoOwnerEl = document.getElementById("nodeInfoOwner");
+    const nodeInfoArmyEl = document.getElementById("nodeInfoArmy");
+    const nodeInfoDeltaEl = document.getElementById("nodeInfoDelta");
+    const nodeInfoPositionEl = document.getElementById("nodeInfoPosition");
+    const sendPerTickInput = document.getElementById("sendPerTickInput");
+    const routeInfoHintEl = document.getElementById("routeInfoHint");
+    const updateRouteRateButton = document.getElementById("updateRouteRateButton");
+    const connectionCanvasEl = document.getElementById("connectionCanvas");
+    const connectionTargetsSectionEl = document.getElementById("connectionTargetsSection");
+    const connectionTargetsHintEl = document.getElementById("connectionTargetsHint");
+    const connectionTargetsListEl = document.getElementById("connectionTargetsList");
+    const nodeRoutesSectionEl = document.getElementById("nodeRoutesSection");
+    const nodeRoutesListEl = document.getElementById("nodeRoutesList");
+    const nodeInfoStatusEl = document.getElementById("nodeInfoStatus");
+
+    let activeRegion = null;
+    let buildPollTimer = null;
+    let gamePollTimer = null;
+    let sessionToken = localStorage.getItem(SESSION_KEY) || "";
+    let selectedNodeId = null;
+    let currentPlayerId = null;
+    let autoFocusedPlayerId = null;
+    let visibleTileRefreshVersion = 0;
+    let lastOwnedFeatures = [];
+    let stateBoundaryCollection = null;
+    let currentGenerationFeatures = [];
+    let renderedNodeFeatures = [];
+    let selectedNodeFeature = null;
+    let previewTargetNodeId = null;
+    let connectPreviewMode = false;
+    let nextBuildPollDelayMs = BUILD_POLL_MS;
+    let nextGamePollDelayMs = GAME_POLL_MS;
+    let visibleTileRefreshTimer = null;
+    let activeVisibleTileAbortController = null;
+    let lastVisibleTileRefreshStartedAt = 0;
+    let connectableRefreshTimer = null;
+    let connectableRefreshVersion = 0;
+    let connectableNodeIds = new Set();
+    let previewPathCache = new Map();
+    let activePreviewPathAbortController = null;
+    let previewPathRequestVersion = 0;
+    let panelAutoHiddenForSession = false;
+    let inspectedNodeId = null;
+    let authRequestInFlight = false;
+    let currentAttackFeatures = [];
+    let currentPreviewFeatures = [];
+    let selectedNodeTargets = [];
+    let selectedNodeTargetsRequestVersion = 0;
+    let attackArrowAnimationFrame = 0;
+    const connectionCanvasContext = connectionCanvasEl.getContext("2d");
+
+    const map = new maplibregl.Map({ container: "map", style: "https://tiles.openfreemap.org/styles/liberty", center: [-70.5, 43.8], zoom: 11.8 });
+    map.addControl(new maplibregl.NavigationControl(), "top-right");
+
+    function emptyFeatureCollection() { return { type: "FeatureCollection", features: [] }; }
+    function normalizeSendPerTick(value) {
+      const parsed = Number.parseInt(value, 10);
+      if (!Number.isFinite(parsed)) {
+        return DEFAULT_SEND_PER_TICK;
+      }
+      return clamp(parsed, 1, 250);
+    }
+    function setSendPerTickValue(value) {
+      sendPerTickInput.value = String(normalizeSendPerTick(value));
+    }
+    function actualNodeCoordinates(feature) {
+      const lon = Number(feature?.properties?.longitude);
+      const lat = Number(feature?.properties?.latitude);
+      if (Number.isFinite(lon) && Number.isFinite(lat)) {
+        return [lon, lat];
+      }
+      const coords = feature?.geometry?.coordinates;
+      return Array.isArray(coords) ? coords : null;
+    }
+    function featureCollectionFor(feature) {
+      return feature ? { type: "FeatureCollection", features: [feature] } : emptyFeatureCollection();
+    }
+    function updateClickedNodeHighlight(feature = null) {
+      map.getSource("selected-node")?.setData(featureCollectionFor(feature));
+    }
+    function findAttackFeature(fromNodeId, toNodeId) {
+      return currentAttackFeatures.find((feature) => (
+        String(feature?.properties?.fromNodeId || "") === String(fromNodeId || "")
+        && String(feature?.properties?.toNodeId || "") === String(toNodeId || "")
+      )) || null;
+    }
+    function collapseOverlappingAttackFeatures(features) {
+      const grouped = new Map();
+      for (const feature of features || []) {
+        const props = feature?.properties || {};
+        const key = [
+          String(props.ownerState || ""),
+          String(props.mode || ""),
+          String(props.fromNodeId || ""),
+          String(props.toNodeId || ""),
+        ].join(":");
+        const sendPerTick = normalizeSendPerTick(props.sendPerTick || DEFAULT_SEND_PER_TICK);
+        if (!grouped.has(key)) {
+          grouped.set(key, {
+            ...feature,
+            properties: {
+              ...props,
+              sendPerTick,
+              overlapCount: 1,
+            },
+          });
+          continue;
+        }
+        const existing = grouped.get(key);
+        existing.properties.sendPerTick += sendPerTick;
+        existing.properties.overlapCount = Number(existing.properties.overlapCount || 1) + 1;
+        existing.properties.createdAt = Math.min(
+          Number(existing.properties.createdAt || Number.MAX_SAFE_INTEGER),
+          Number(props.createdAt || Number.MAX_SAFE_INTEGER),
+        );
+      }
+      return Array.from(grouped.values());
+    }
+    function attacksForNode(nodeId) {
+      const id = String(nodeId || "");
+      if (!id) {
+        return [];
+      }
+      return currentAttackFeatures.filter((feature) => (
+        String(feature?.properties?.fromNodeId || "") === id
+        || String(feature?.properties?.toNodeId || "") === id
+      ));
+    }
+    function nodeNetPerTick(feature) {
+      const nodeId = String(feature?.properties?.id || "");
+      if (!nodeId) {
+        return {
+          net: 0,
+          passive: 0,
+          outgoing: 0,
+          incomingTransfer: 0,
+          incomingAttack: 0,
+        };
+      }
+      let passive = feature?.properties?.ownerState === "neutral" ? 0 : 1;
+      let outgoing = 0;
+      let incomingTransfer = 0;
+      let incomingAttack = 0;
+      for (const attackFeature of attacksForNode(nodeId)) {
+        const sendPerTick = normalizeSendPerTick(attackFeature?.properties?.sendPerTick || DEFAULT_SEND_PER_TICK);
+        if (String(attackFeature?.properties?.fromNodeId || "") === nodeId) {
+          outgoing += sendPerTick;
+          continue;
+        }
+        if (String(attackFeature?.properties?.mode || "") === "transfer") {
+          incomingTransfer += sendPerTick;
+        } else {
+          incomingAttack += sendPerTick;
+        }
+      }
+      return {
+        net: passive - outgoing + incomingTransfer - incomingAttack,
+        passive,
+        outgoing,
+        incomingTransfer,
+        incomingAttack,
+      };
+    }
+    function formatSignedTick(value) {
+      return `${value >= 0 ? "+" : ""}${value.toLocaleString()}`;
+    }
+    function routeSummaryLabel(feature, nodeId) {
+      const fromId = String(feature?.properties?.fromNodeId || "");
+      const toId = String(feature?.properties?.toNodeId || "");
+      if (fromId === nodeId) {
+        return `Outgoing ${fromId} -> ${toId}`;
+      }
+      return `Incoming ${fromId} -> ${toId}`;
+    }
+    function setAttackFeatures(features) {
+      currentAttackFeatures = collapseOverlappingAttackFeatures(features);
+      map.getSource("attack-lines")?.setData({
+        type: "FeatureCollection",
+        features: currentAttackFeatures,
+      });
+      map.getSource("attack-flow-arrows")?.setData({
+        type: "FeatureCollection",
+        features: [],
+      });
+    }
+    function clearSelectedNodeTargets() {
+      selectedNodeTargets = [];
+      connectionTargetsSectionEl.classList.add("hidden");
+      connectionTargetsListEl.replaceChildren();
+      connectionTargetsHintEl.textContent = "Click one of your nodes to load its directly adjacent road targets here.";
+    }
+    function renderSelectedNodeTargets() {
+      if (
+        !selectedNodeFeature
+        || String(selectedNodeFeature?.properties?.ownerState || "") !== "self"
+        || String(inspectedNodeId || "") !== String(selectedNodeId || "")
+      ) {
+        clearSelectedNodeTargets();
+        return;
+      }
+      if (!selectedNodeTargets.length) {
+        connectionTargetsSectionEl.classList.remove("hidden");
+        connectionTargetsListEl.replaceChildren();
+        connectionTargetsHintEl.textContent = `Node ${selectedNodeId} has no directly adjacent road targets right now.`;
+        return;
+      }
+      connectionTargetsSectionEl.classList.remove("hidden");
+      connectionTargetsHintEl.textContent = `Choose a directly adjacent road target for node ${selectedNodeId}.`;
+      const fragment = document.createDocumentFragment();
+      for (const targetFeature of selectedNodeTargets) {
+        const targetNodeId = String(targetFeature?.properties?.id || "");
+        const rowEl = document.createElement("div");
+        rowEl.className = "route-row";
+        const topEl = document.createElement("div");
+        topEl.className = "route-row-top";
+        const titleEl = document.createElement("div");
+        titleEl.className = "route-row-title";
+        titleEl.textContent = `Node ${targetNodeId}`;
+        const modeEl = document.createElement("div");
+        modeEl.className = "route-row-mode";
+        modeEl.textContent = `${nodeOwnerLabel(targetFeature)} · ${Number(targetFeature?.properties?.army || 0).toLocaleString()} army`;
+        topEl.append(titleEl, modeEl);
+        const controlsEl = document.createElement("div");
+        controlsEl.className = "route-row-controls";
+        const buttonEl = document.createElement("button");
+        buttonEl.type = "button";
+        buttonEl.className = findAttackFeature(selectedNodeId, targetNodeId) ? "secondary" : "";
+        buttonEl.textContent = findAttackFeature(selectedNodeId, targetNodeId) ? "Remove" : "Connect";
+        buttonEl.dataset.targetNodeId = targetNodeId;
+        controlsEl.append(buttonEl);
+        rowEl.append(topEl, controlsEl);
+        fragment.append(rowEl);
+      }
+      connectionTargetsListEl.replaceChildren(fragment);
+    }
+    async function refreshSelectedNodeTargets() {
+      if (!sessionToken || !selectedNodeFeature || String(selectedNodeFeature?.properties?.ownerState || "") !== "self") {
+        clearSelectedNodeTargets();
+        return;
+      }
+      const requestVersion = ++selectedNodeTargetsRequestVersion;
+      connectionTargetsSectionEl.classList.remove("hidden");
+      connectionTargetsListEl.replaceChildren();
+      connectionTargetsHintEl.textContent = `Loading adjacent road targets for node ${selectedNodeId}...`;
+      try {
+        const payload = await fetchJson(CONNECTABLE_NODES_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            token: sessionToken,
+            fromNodeId: selectedNodeId,
+            nodeIds: [],
+          }),
+        });
+        if (requestVersion !== selectedNodeTargetsRequestVersion) {
+          return;
+        }
+        selectedNodeTargets = [...(payload.targets?.features || [])].sort((left, right) => String(left?.properties?.id || "").localeCompare(String(right?.properties?.id || "")));
+        renderSelectedNodeTargets();
+      } catch (error) {
+        if (requestVersion !== selectedNodeTargetsRequestVersion) {
+          return;
+        }
+        selectedNodeTargets = [];
+        connectionTargetsSectionEl.classList.remove("hidden");
+        connectionTargetsListEl.replaceChildren();
+        connectionTargetsHintEl.textContent = `Adjacent target lookup failed: ${error.message}`;
+      }
+    }
+    async function updateAttackRate(fromNodeId, toNodeId, sendPerTick) {
+      if (!sessionToken) {
+        setStatus("Log in first.");
+        return;
+      }
+      try {
+        await fetchJson(CONNECTION_RATE_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            token: sessionToken,
+            fromNodeId,
+            toNodeId,
+            sendPerTick,
+          }),
+        });
+        const nextFeatures = currentAttackFeatures.map((feature) => (
+          String(feature?.properties?.fromNodeId || "") === String(fromNodeId)
+          && String(feature?.properties?.toNodeId || "") === String(toNodeId)
+            ? {
+              ...feature,
+              properties: {
+                ...feature.properties,
+                sendPerTick: normalizeSendPerTick(sendPerTick),
+              },
+            }
+            : feature
+        ));
+        setAttackFeatures(nextFeatures);
+        updateNodeInfo(renderedNodeFeatures.find((feature) => String(feature?.properties?.id || "") === inspectedNodeId) || null);
+        setStatus(`Updated route ${fromNodeId} -> ${toNodeId} to ${normalizeSendPerTick(sendPerTick).toLocaleString()} army per tick.`);
+        void refreshGameState();
+      } catch (error) {
+        setStatus(`Route rate update failed: ${error.message}`);
+      }
+    }
+    async function removeAttackConnection(fromNodeId, toNodeId) {
+      if (!sessionToken) {
+        setStatus("Log in first.");
+        return;
+      }
+      try {
+        await fetchJson(CONNECTION_REMOVE_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            token: sessionToken,
+            fromNodeId,
+            toNodeId,
+          }),
+        });
+        setAttackFeatures(currentAttackFeatures.filter((feature) => !(
+          String(feature?.properties?.fromNodeId || "") === String(fromNodeId)
+          && String(feature?.properties?.toNodeId || "") === String(toNodeId)
+        )));
+        renderSelectedNodeTargets();
+        updateNodeInfo(renderedNodeFeatures.find((feature) => String(feature?.properties?.id || "") === inspectedNodeId) || null);
+        setStatus(`Removed route ${fromNodeId} -> ${toNodeId}.`);
+        void refreshGameState();
+      } catch (error) {
+        setStatus(`Route remove failed: ${error.message}`);
+      }
+    }
+    async function toggleConnectionToTargetNode(targetNodeId) {
+      if (!sessionToken || !selectedNodeId || !selectedNodeFeature) {
+        setStatus("Log in first, then click one of your nodes.");
+        return;
+      }
+      const targetFeature = selectedNodeTargets.find((feature) => String(feature?.properties?.id || "") === String(targetNodeId)) || null;
+      if (!targetFeature) {
+        setStatus(`Node ${targetNodeId} is not directly adjacent to node ${selectedNodeId}.`);
+        return;
+      }
+      const sendPerTick = normalizeSendPerTick(sendPerTickInput.value);
+      try {
+        const response = await fetchJson(ATTACK_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            token: sessionToken,
+            fromNodeId: selectedNodeId,
+            toNodeId: targetNodeId,
+            sendPerTick,
+          }),
+        });
+        if (response.removed) {
+          setAttackFeatures(currentAttackFeatures.filter((attackFeature) => !(
+            String(attackFeature?.properties?.fromNodeId || "") === selectedNodeId
+            && String(attackFeature?.properties?.toNodeId || "") === String(targetNodeId)
+          )));
+          setStatus(`Removed connection ${selectedNodeId} -> ${targetNodeId}.`);
+        } else if (response.attack) {
+          const nextFeatures = currentAttackFeatures.filter((attackFeature) => !(
+            String(attackFeature?.properties?.fromNodeId || "") === selectedNodeId
+            && String(attackFeature?.properties?.toNodeId || "") === String(targetNodeId)
+          ));
+          nextFeatures.push(response.attack);
+          setAttackFeatures(nextFeatures);
+          setStatus(String(targetFeature?.properties?.ownerState || "") === "self"
+            ? `Transfer started at ${sendPerTick.toLocaleString()} army per tick.`
+            : `Attack started at ${sendPerTick.toLocaleString()} army per tick.`);
+        }
+        renderSelectedNodeTargets();
+        updateNodeInfo(renderedNodeFeatures.find((feature) => String(feature?.properties?.id || "") === inspectedNodeId) || null);
+        void refreshGameState();
+      } catch (error) {
+        setStatus(`Connection failed: ${error.message}`);
+      }
+    }
+    function renderNodeRouteList(feature = null) {
+      if (!feature) {
+        nodeRoutesSectionEl.classList.add("hidden");
+        nodeRoutesListEl.replaceChildren();
+        return;
+      }
+      const nodeId = String(feature?.properties?.id || "");
+      const routes = attacksForNode(nodeId);
+      if (!routes.length) {
+        nodeRoutesSectionEl.classList.add("hidden");
+        nodeRoutesListEl.replaceChildren();
+        return;
+      }
+      nodeRoutesSectionEl.classList.remove("hidden");
+      const fragment = document.createDocumentFragment();
+      for (const routeFeature of routes) {
+        const routeEl = document.createElement("div");
+        routeEl.className = "route-row";
+        const topEl = document.createElement("div");
+        topEl.className = "route-row-top";
+        const titleEl = document.createElement("div");
+        titleEl.className = "route-row-title";
+        titleEl.textContent = routeSummaryLabel(routeFeature, nodeId);
+        const modeEl = document.createElement("div");
+        modeEl.className = "route-row-mode";
+        const sendPerTick = normalizeSendPerTick(routeFeature?.properties?.sendPerTick || DEFAULT_SEND_PER_TICK);
+        const overlapCount = Number(routeFeature?.properties?.overlapCount || 1);
+        modeEl.textContent = `${String(routeFeature?.properties?.mode || "attack")} · ${sendPerTick.toLocaleString()}/tick${overlapCount > 1 ? ` · x${overlapCount}` : ""}`;
+        topEl.append(titleEl, modeEl);
+        routeEl.append(topEl);
+
+        const isEditable = (
+          String(routeFeature?.properties?.fromNodeId || "") === nodeId
+          && String(routeFeature?.properties?.ownerState || "") === "self"
+        );
+        if (isEditable) {
+          const controlsEl = document.createElement("div");
+          controlsEl.className = "route-row-controls";
+          const inputEl = document.createElement("input");
+          inputEl.type = "number";
+          inputEl.min = "1";
+          inputEl.max = "250";
+          inputEl.step = "1";
+          inputEl.value = String(sendPerTick);
+          inputEl.dataset.fromNodeId = String(routeFeature?.properties?.fromNodeId || "");
+          inputEl.dataset.toNodeId = String(routeFeature?.properties?.toNodeId || "");
+          const buttonEl = document.createElement("button");
+          buttonEl.type = "button";
+          buttonEl.className = "secondary";
+          buttonEl.textContent = "Update";
+          buttonEl.dataset.action = "update";
+          buttonEl.dataset.fromNodeId = inputEl.dataset.fromNodeId;
+          buttonEl.dataset.toNodeId = inputEl.dataset.toNodeId;
+          const deleteButtonEl = document.createElement("button");
+          deleteButtonEl.type = "button";
+          deleteButtonEl.className = "secondary";
+          deleteButtonEl.textContent = "Delete";
+          deleteButtonEl.dataset.action = "delete";
+          deleteButtonEl.dataset.fromNodeId = inputEl.dataset.fromNodeId;
+          deleteButtonEl.dataset.toNodeId = inputEl.dataset.toNodeId;
+          controlsEl.append(inputEl, buttonEl, deleteButtonEl);
+          routeEl.append(controlsEl);
+        }
+        fragment.append(routeEl);
+      }
+      nodeRoutesListEl.replaceChildren(fragment);
+    }
+    function updateRouteControls(feature = null) {
+      const inspectedId = String(feature?.properties?.id || "");
+      const routeFeature = selectedNodeId && inspectedId && inspectedId !== selectedNodeId
+        ? findAttackFeature(selectedNodeId, inspectedId)
+        : null;
+      if (routeFeature) {
+        setSendPerTickValue(routeFeature.properties?.sendPerTick || DEFAULT_SEND_PER_TICK);
+        updateRouteRateButton.disabled = !sessionToken;
+        routeInfoHintEl.textContent = `Route ${selectedNodeId} -> ${inspectedId} is active. Update the send rate here, or click the same target again to remove the route.`;
+        return;
+      }
+      updateRouteRateButton.disabled = true;
+      routeInfoHintEl.textContent = selectedNodeId
+        ? `How to connect: node ${selectedNodeId} is the sender. Use the adjacent target list in this panel.`
+        : "How to connect: click one of your nodes, then use the adjacent target list in this panel.";
+    }
+    function nodeDisplayOffsetDegrees(index, total, lat) {
+      if (total <= 1) {
+        return [0, 0];
+      }
+      const ring = Math.floor(index / 6);
+      const stepInRing = index % 6;
+      const pointsInRing = Math.min(total, 6);
+      const angle = (Math.PI * 2 * stepInRing) / pointsInRing;
+      const meters = 7 + (ring * 5);
+      const latOffset = (meters / 111_320) * Math.sin(angle);
+      const lonOffset = (meters / (111_320 * Math.cos((lat * Math.PI) / 180) || 1)) * Math.cos(angle);
+      return [lonOffset, latOffset];
+    }
+    function spreadOverlappingNodeFeatures(features) {
+      const grouped = new Map();
+      for (const feature of features) {
+        const coords = actualNodeCoordinates(feature);
+        if (!coords) {
+          continue;
+        }
+        const key = `${coords[0].toFixed(6)}:${coords[1].toFixed(6)}`;
+        if (!grouped.has(key)) {
+          grouped.set(key, []);
+        }
+        grouped.get(key).push(feature);
+      }
+      for (const siblings of grouped.values()) {
+        siblings.sort((left, right) => String(left?.properties?.id || "").localeCompare(String(right?.properties?.id || "")));
+      }
+      return features.map((feature) => {
+        const coords = actualNodeCoordinates(feature);
+        if (!coords) {
+          return feature;
+        }
+        const key = `${coords[0].toFixed(6)}:${coords[1].toFixed(6)}`;
+        const siblings = grouped.get(key) || [feature];
+        if (siblings.length <= 1) {
+          return feature;
+        }
+        const index = siblings.findIndex((candidate) => String(candidate?.properties?.id || "") === String(feature?.properties?.id || ""));
+        const [lonOffset, latOffset] = nodeDisplayOffsetDegrees(Math.max(index, 0), siblings.length, coords[1]);
+        return {
+          ...feature,
+          geometry: {
+            ...feature.geometry,
+            coordinates: [coords[0] + lonOffset, coords[1] + latOffset],
+          },
+        };
+      });
+    }
+    function setStatus(message) { statusEl.textContent = message; }
+    function saveLoginFormState() {
+      try {
+        localStorage.setItem(LOGIN_FORM_KEY, JSON.stringify({
+          username: usernameInput.value || "",
+          password: passwordInput.value || "",
+        }));
+      } catch {}
+    }
+    function loadLoginFormState() {
+      try {
+        const raw = localStorage.getItem(LOGIN_FORM_KEY);
+        if (!raw) {
+          return;
+        }
+        const saved = JSON.parse(raw);
+        usernameInput.value = typeof saved?.username === "string" ? saved.username : "";
+        passwordInput.value = typeof saved?.password === "string" ? saved.password : "";
+      } catch {}
+    }
+    function hideMainPanel(persist = true) {
+      panelEl.classList.add("hidden");
+      showPanelButton.classList.add("visible");
+      if (persist) savePanelState();
+    }
+    function showMainPanel(persist = true) {
+      panelEl.classList.remove("hidden");
+      showPanelButton.classList.remove("visible");
+      if (persist) savePanelState();
+    }
+    function installButtonPressEffects() {
+      document.querySelectorAll("button").forEach((button) => {
+        button.addEventListener("click", () => {
+          button.classList.remove("button-press");
+          void button.offsetWidth;
+          button.classList.add("button-press");
+          window.setTimeout(() => button.classList.remove("button-press"), 160);
+        });
+      });
+    }
+    function savePanelState() { localStorage.setItem(PANEL_KEY, panelEl.classList.contains("hidden") ? "hidden" : "visible"); }
+    function setAuthPending(pending, actionLabel = "Working") {
+      authRequestInFlight = pending;
+      registerButton.disabled = pending;
+      loginButton.disabled = pending;
+      logoutButton.disabled = pending;
+      usernameInput.disabled = pending;
+      passwordInput.disabled = pending;
+      registerButton.textContent = pending && actionLabel === "Register" ? "Registering..." : "Register";
+      loginButton.textContent = pending && actionLabel === "Login" ? "Logging in..." : "Login";
+      logoutButton.textContent = pending ? "Please wait..." : "Logout";
+    }
+    function loadPanelState() {
+      if (!sessionToken) {
+        showMainPanel(false);
+        return;
+      }
+      if (localStorage.getItem(PANEL_KEY) === "hidden") {
+        hideMainPanel(false);
+      }
+    }
+    function saveTopBarState() { localStorage.setItem(TOP_BAR_KEY, topBarEl.classList.contains("hidden") ? "hidden" : "visible"); }
+    function loadTopBarState() { if (localStorage.getItem(TOP_BAR_KEY) === "hidden") { topBarEl.classList.add("hidden"); showTopBarButton.classList.add("visible"); } }
+    hidePanelButton.addEventListener("click", () => { hideMainPanel(true); });
+    showPanelButton.addEventListener("click", () => { showMainPanel(true); });
+    hideTopBarButton.addEventListener("click", () => { topBarEl.classList.add("hidden"); showTopBarButton.classList.add("visible"); saveTopBarState(); });
+    showTopBarButton.addEventListener("click", () => { topBarEl.classList.remove("hidden"); showTopBarButton.classList.remove("visible"); saveTopBarState(); });
+
+    async function fetchJson(url, options = {}) {
+      const controller = new AbortController();
+      const externalSignal = options.signal || null;
+      let detachExternalAbort = null;
+      if (externalSignal) {
+        if (externalSignal.aborted) {
+          controller.abort();
+        } else {
+          const forwardAbort = () => controller.abort();
+          externalSignal.addEventListener("abort", forwardAbort, { once: true });
+          detachExternalAbort = () => externalSignal.removeEventListener("abort", forwardAbort);
+        }
+      }
+      const timeoutId = window.setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+      try {
+        const requestOptions = { ...options };
+        delete requestOptions.signal;
+        const response = await fetch(url, {
+          ...requestOptions,
+          signal: controller.signal,
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const error = new Error(body.error || `Request failed with HTTP ${response.status}`);
+          error.retryable = response.status >= 500 || response.status === 408 || response.status === 429;
+          throw error;
+        }
+        return body;
+      } catch (error) {
+        if (error.name === "AbortError") {
+          error.message = `Request timed out after ${Math.round(FETCH_TIMEOUT_MS / 1000)}s`;
+        }
+        if (error.name === "AbortError" || error.name === "TypeError" || error.retryable) {
+          error.retryable = true;
+          error.retryAfterMs = NETWORK_RETRY_MS;
+        }
+        throw error;
+      } finally {
+        window.clearTimeout(timeoutId);
+        detachExternalAbort?.();
+      }
+    }
+
+    function formatRetryDelay(ms) {
+      const minutes = Math.max(1, Math.round(ms / 60000));
+      return minutes === 1 ? "1 minute" : `${minutes} minutes`;
+    }
+
+    function boundsFeature(bounds) {
+      return {
+        type: "Feature",
+        geometry: {
+          type: "Polygon",
+          coordinates: [[
+            [bounds.west, bounds.south],
+            [bounds.east, bounds.south],
+            [bounds.east, bounds.north],
+            [bounds.west, bounds.north],
+            [bounds.west, bounds.south],
+          ]],
+        },
+        properties: {
+          id: bounds.id || `${bounds.west},${bounds.south},${bounds.east},${bounds.north}`,
+        },
+      };
+    }
+
+    function fallbackGenerationTargetFeatures(region) {
+      if (Array.isArray(region.query_bounds) && region.query_bounds.length) {
+        return region.query_bounds.map(boundsFeature);
+      }
+      return region.bounds ? [boundsFeature(region.bounds)] : [];
+    }
+
+    async function loadStateBoundaryCollection() {
+      if (!stateBoundaryCollection) {
+        stateBoundaryCollection = await fetchJson(STATE_BOUNDARIES_URL, { cache: "no-store" });
+      }
+      return stateBoundaryCollection;
+    }
+
+    function preciseGenerationTargetFeatures(region, collection) {
+      const wantedStates = new Set((region.states || []).map((name) => String(name).trim().toLowerCase()));
+      return (collection.features || []).filter((feature) => wantedStates.has(String(feature.properties?.name || "").trim().toLowerCase()));
+    }
+
+    function clipPolygonRingToBounds(ring, bounds) {
+      const edges = [
+        {
+          inside: ([x]) => x >= bounds.west,
+          intersect: (a, b) => {
+            const dx = b[0] - a[0];
+            if (dx === 0) return [bounds.west, a[1]];
+            const t = (bounds.west - a[0]) / dx;
+            return [bounds.west, a[1] + ((b[1] - a[1]) * t)];
+          },
+        },
+        {
+          inside: ([x]) => x <= bounds.east,
+          intersect: (a, b) => {
+            const dx = b[0] - a[0];
+            if (dx === 0) return [bounds.east, a[1]];
+            const t = (bounds.east - a[0]) / dx;
+            return [bounds.east, a[1] + ((b[1] - a[1]) * t)];
+          },
+        },
+        {
+          inside: (([, y]) => y >= bounds.south),
+          intersect: (a, b) => {
+            const dy = b[1] - a[1];
+            if (dy === 0) return [a[0], bounds.south];
+            const t = (bounds.south - a[1]) / dy;
+            return [a[0] + ((b[0] - a[0]) * t), bounds.south];
+          },
+        },
+        {
+          inside: (([, y]) => y <= bounds.north),
+          intersect: (a, b) => {
+            const dy = b[1] - a[1];
+            if (dy === 0) return [a[0], bounds.north];
+            const t = (bounds.north - a[1]) / dy;
+            return [a[0] + ((b[0] - a[0]) * t), bounds.north];
+          },
+        },
+      ];
+
+      let output = ring.slice();
+      for (const edge of edges) {
+        const input = output.slice();
+        output = [];
+        if (!input.length) break;
+        let start = input[input.length - 1];
+        for (const end of input) {
+          const endInside = edge.inside(end);
+          const startInside = edge.inside(start);
+          if (endInside) {
+            if (!startInside) {
+              output.push(edge.intersect(start, end));
+            }
+            output.push(end);
+          } else if (startInside) {
+            output.push(edge.intersect(start, end));
+          }
+          start = end;
+        }
+      }
+
+      if (output.length < 3) {
+        return [];
+      }
+      const first = output[0];
+      const last = output[output.length - 1];
+      if (first[0] !== last[0] || first[1] !== last[1]) {
+        output.push([first[0], first[1]]);
+      }
+      return output;
+    }
+
+    function clipGeometryToBounds(geometry, bounds) {
+      if (!geometry) return null;
+      if (geometry.type === "Polygon") {
+        const rings = (geometry.coordinates || [])
+          .map((ring) => clipPolygonRingToBounds(ring, bounds))
+          .filter((ring) => ring.length >= 4);
+        return rings.length ? { type: "Polygon", coordinates: rings } : null;
+      }
+      if (geometry.type === "MultiPolygon") {
+        const polygons = (geometry.coordinates || [])
+          .map((polygon) => polygon.map((ring) => clipPolygonRingToBounds(ring, bounds)).filter((ring) => ring.length >= 4))
+          .filter((polygon) => polygon.length);
+        return polygons.length ? { type: "MultiPolygon", coordinates: polygons } : null;
+      }
+      return null;
+    }
+
+    function clipQueryBlocksToGeneration(queryGeojson, generationFeatures) {
+      const clipped = [];
+      for (const block of queryGeojson.features || []) {
+        const coords = block.geometry?.coordinates?.[0];
+        if (!Array.isArray(coords) || coords.length < 4) continue;
+        const lons = coords.map((point) => point[0]);
+        const lats = coords.map((point) => point[1]);
+        const bounds = {
+          west: Math.min(...lons),
+          east: Math.max(...lons),
+          south: Math.min(...lats),
+          north: Math.max(...lats),
+        };
+        let pieceIndex = 0;
+        for (const feature of generationFeatures) {
+          const clippedGeometry = clipGeometryToBounds(feature.geometry, bounds);
+          if (!clippedGeometry) continue;
+          clipped.push({
+            type: "Feature",
+            properties: {
+              ...block.properties,
+              clipped_from: feature.properties?.name || feature.properties?.id || "region",
+              clipped_piece: pieceIndex,
+            },
+            geometry: clippedGeometry,
+          });
+          pieceIndex += 1;
+        }
+      }
+      return { type: "FeatureCollection", features: clipped };
+    }
+
+    function loadStoredBuildStatus() {
+      try {
+        const raw = localStorage.getItem(LAST_BUILD_STATUS_KEY);
+        return raw ? JSON.parse(raw) : null;
+      } catch {
+        return null;
+      }
+    }
+
+    function loadStoredOwnedView() {
+      try {
+        const raw = localStorage.getItem(LAST_OWNED_VIEW_KEY);
+        return raw ? JSON.parse(raw) : null;
+      } catch {
+        return null;
+      }
+    }
+
+    function saveOwnedView(features) {
+      try {
+        const coords = features
+          .map((feature) => feature.geometry?.coordinates)
+          .filter((value) => Array.isArray(value) && value.length >= 2);
+        if (!coords.length) {
+          return;
+        }
+        if (coords.length === 1) {
+          localStorage.setItem(LAST_OWNED_VIEW_KEY, JSON.stringify({
+            type: "point",
+            center: coords[0],
+            zoom: 13.8,
+          }));
+          return;
+        }
+        let minLon = coords[0][0];
+        let maxLon = coords[0][0];
+        let minLat = coords[0][1];
+        let maxLat = coords[0][1];
+        for (const [lon, lat] of coords) {
+          minLon = Math.min(minLon, lon);
+          maxLon = Math.max(maxLon, lon);
+          minLat = Math.min(minLat, lat);
+          maxLat = Math.max(maxLat, lat);
+        }
+        localStorage.setItem(LAST_OWNED_VIEW_KEY, JSON.stringify({
+          type: "bounds",
+          bounds: [[minLon, minLat], [maxLon, maxLat]],
+          maxZoom: 13.8,
+        }));
+      } catch {}
+    }
+
+    function focusStoredOwnedView() {
+      const view = loadStoredOwnedView();
+      if (!view) {
+        return false;
+      }
+      if (view.type === "point" && Array.isArray(view.center)) {
+        map.easeTo({
+          center: view.center,
+          zoom: Number(view.zoom) || 13.8,
+          duration: 0,
+        });
+        return true;
+      }
+      if (view.type === "bounds" && Array.isArray(view.bounds)) {
+        map.fitBounds(view.bounds, {
+          padding: { top: 90, bottom: 90, left: 90, right: 360 },
+          duration: 0,
+          maxZoom: Number(view.maxZoom) || 13.8,
+        });
+        return true;
+      }
+      return false;
+    }
+
+    function selectedNodeSummary(feature = selectedNodeFeature) {
+      if (!feature) {
+        return "None";
+      }
+      return `${feature.properties.id} (${Number(feature.properties.army || 0).toLocaleString()} army)`;
+    }
+
+    function nodeOwnerLabel(feature) {
+      const ownerState = String(feature?.properties?.ownerState || "");
+      if (ownerState === "self") return "You";
+      if (ownerState === "enemy") return String(feature?.properties?.ownerUsername || "Enemy");
+      return "Neutral";
+    }
+
+    function updateNodeInfo(feature = null) {
+      if (!feature) {
+        nodeInfoEl.classList.add("hidden");
+        nodeInfoTitleEl.textContent = "Node Info";
+        nodeInfoIdEl.textContent = "None";
+        nodeInfoOwnerEl.textContent = "No node selected";
+        nodeInfoArmyEl.textContent = "0";
+        nodeInfoDeltaEl.textContent = "0";
+        nodeInfoPositionEl.textContent = "-";
+        nodeInfoStatusEl.textContent = "Click any visible node to inspect it here.";
+        updateRouteControls(null);
+        clearSelectedNodeTargets();
+        renderNodeRouteList(null);
+        updateClickedNodeHighlight(null);
+        return;
+      }
+      nodeInfoEl.classList.remove("hidden");
+      const coords = actualNodeCoordinates(feature);
+      const perTick = nodeNetPerTick(feature);
+      nodeInfoTitleEl.textContent = `Node ${feature.properties?.id || "Unknown"}`;
+      nodeInfoIdEl.textContent = String(feature.properties?.id || "Unknown");
+      nodeInfoOwnerEl.textContent = nodeOwnerLabel(feature);
+      nodeInfoArmyEl.textContent = Number(feature.properties?.army || 0).toLocaleString();
+      nodeInfoDeltaEl.textContent = formatSignedTick(perTick.net);
+      nodeInfoPositionEl.textContent = coords ? `${coords[1].toFixed(4)}, ${coords[0].toFixed(4)}` : "-";
+      nodeInfoStatusEl.textContent = feature.properties?.ownerState === "self"
+        ? `This is your node. It gains +${perTick.passive}/tick, sends -${perTick.outgoing.toLocaleString()}/tick, receives +${perTick.incomingTransfer.toLocaleString()}/tick, and takes -${perTick.incomingAttack.toLocaleString()}/tick. Use the adjacent target list below to connect.`
+        : `This node gains ${perTick.passive ? `+${perTick.passive}` : "0"}/tick and is affected by any listed army lines below.`;
+      updateRouteControls(feature);
+      renderSelectedNodeTargets();
+      renderNodeRouteList(feature);
+      updateClickedNodeHighlight(feature);
+    }
+
+    function inspectNode(feature) {
+      inspectedNodeId = String(feature?.properties?.id || "") || null;
+      updateNodeInfo(feature || null);
+    }
+
+    async function updateSelectedRouteRate() {
+      if (!sessionToken || !selectedNodeId || !inspectedNodeId || inspectedNodeId === selectedNodeId) {
+        updateRouteControls(renderedNodeFeatures.find((feature) => String(feature.properties?.id || "") === inspectedNodeId) || null);
+        return;
+      }
+      const route = findAttackFeature(selectedNodeId, inspectedNodeId);
+      if (!route) {
+        setStatus("No active route is selected. Create the connection first, then update its send rate here.");
+        updateRouteControls(renderedNodeFeatures.find((feature) => String(feature.properties?.id || "") === inspectedNodeId) || null);
+        return;
+      }
+      const sendPerTick = normalizeSendPerTick(sendPerTickInput.value);
+      updateRouteRateButton.disabled = true;
+      try {
+        await updateAttackRate(selectedNodeId, inspectedNodeId, sendPerTick);
+        await refreshGameState();
+      } catch (error) {
+        setStatus(`Route rate update failed: ${error.message}`);
+      } finally {
+        updateRouteControls(renderedNodeFeatures.find((feature) => String(feature.properties?.id || "") === inspectedNodeId) || null);
+      }
+    }
+
+    function abortPreviewPathRequest() {
+      activePreviewPathAbortController?.abort();
+      activePreviewPathAbortController = null;
+      previewPathRequestVersion += 1;
+    }
+
+    function clearConnectableTargets() {
+      connectableNodeIds = new Set();
+      map.getSource("connectable-nodes")?.setData(emptyFeatureCollection());
+    }
+
+    function clearPreviewLine() {
+      abortPreviewPathRequest();
+      previewTargetNodeId = null;
+      currentPreviewFeatures = [];
+      map.getSource("attack-preview")?.setData(emptyFeatureCollection());
+    }
+
+    function clearSelection(statusMessage = "Selection cleared.") {
+      selectedNodeId = null;
+      selectedNodeFeature = null;
+      connectPreviewMode = false;
+      previewPathCache.clear();
+      selectedNodeTextEl.textContent = "None";
+      clearSelectedNodeTargets();
+      clearConnectableTargets();
+      clearPreviewLine();
+      updateRouteControls(renderedNodeFeatures.find((feature) => String(feature.properties?.id || "") === inspectedNodeId) || null);
+      setStatus(statusMessage);
+    }
+
+    function defaultStatusMessage() {
+      if (map.getZoom() < NODE_MIN_ZOOM) {
+        return ZOOM_IN_MESSAGE;
+      }
+      return "Click one of your green nodes, then use the node info panel to connect to a directly adjacent road target.";
+    }
+
+    function updateSelectionStatus() {
+      if (!selectedNodeFeature) {
+        setStatus(defaultStatusMessage());
+        return;
+      }
+      if (!connectPreviewMode) {
+        setStatus(`Selected node ${selectedNodeId}. Use the adjacent target buttons in the node info panel to connect.`);
+        return;
+      }
+      if (!connectableNodeIds.size) {
+        setStatus(`Selected node ${selectedNodeId}. Waiting for directly adjacent road targets in the visible map area.`);
+        return;
+      }
+      if (previewTargetNodeId) {
+        setStatus(`Previewing the road path to node ${previewTargetNodeId}. Click to confirm the link, or press Escape to cancel.`);
+        return;
+      }
+      setStatus(`Selected node ${selectedNodeId}. ${connectableNodeIds.size.toLocaleString()} directly adjacent road targets are available. Hover a nearby node to preview the road path, then click to connect.`);
+    }
+
+    function connectableCandidateNodeIds() {
+      if (!selectedNodeFeature) {
+        return [];
+      }
+      const selectedCoords = actualNodeCoordinates(selectedNodeFeature);
+      if (!selectedCoords) {
+        return [];
+      }
+      const candidates = renderedNodeFeatures
+        .filter((feature) => String(feature.properties?.id || "") !== selectedNodeId)
+        .map((feature) => {
+          const coords = actualNodeCoordinates(feature);
+          if (!coords) {
+            return null;
+          }
+          const lonDelta = (coords[0] - selectedCoords[0]) * Math.cos((((coords[1] + selectedCoords[1]) / 2) * Math.PI) / 180);
+          const latDelta = coords[1] - selectedCoords[1];
+          return {
+            id: String(feature.properties?.id || ""),
+            distance: (lonDelta * lonDelta) + (latDelta * latDelta),
+          };
+        })
+        .filter(Boolean)
+        .sort((left, right) => left.distance - right.distance)
+        .slice(0, MAX_CONNECTABLE_CANDIDATES);
+      return candidates.map((candidate) => candidate.id);
+    }
+
+    async function refreshConnectableTargets() {
+      if (!sessionToken || !selectedNodeFeature || !selectedNodeId || !connectPreviewMode) {
+        clearConnectableTargets();
+        return;
+      }
+      const candidateNodeIds = connectableCandidateNodeIds();
+      const requestVersion = ++connectableRefreshVersion;
+      if (!candidateNodeIds.length) {
+        clearConnectableTargets();
+        updateSelectionStatus();
+        return;
+      }
+      const payload = await fetchJson(CONNECTABLE_NODES_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          token: sessionToken,
+          fromNodeId: selectedNodeId,
+          nodeIds: candidateNodeIds,
+        }),
+      });
+      if (requestVersion !== connectableRefreshVersion) {
+        return;
+      }
+      const features = payload.targets?.features || [];
+      connectableNodeIds = new Set(features.map((feature) => String(feature.properties?.id || "")).filter(Boolean));
+      map.getSource("connectable-nodes")?.setData({
+        type: "FeatureCollection",
+        features,
+      });
+      if (previewTargetNodeId && !connectableNodeIds.has(previewTargetNodeId)) {
+        clearPreviewLine();
+      }
+      updateSelectionStatus();
+    }
+
+    function scheduleConnectableTargetsRefresh(delayMs = 0) {
+      if (connectableRefreshTimer) {
+        window.clearTimeout(connectableRefreshTimer);
+      }
+      connectableRefreshTimer = window.setTimeout(() => {
+        connectableRefreshTimer = null;
+        refreshConnectableTargets().catch((error) => setStatus(`Adjacent target lookup failed: ${error.message}`));
+      }, delayMs);
+    }
+
+    async function setPreviewTarget(targetFeature) {
+      const targetId = String(targetFeature?.properties?.id || "");
+      if (!connectPreviewMode || !selectedNodeFeature || !targetId || targetId === selectedNodeId || !connectableNodeIds.has(targetId)) {
+        clearPreviewLine();
+        updateSelectionStatus();
+        return;
+      }
+      const cacheKey = `${selectedNodeId}:${targetId}`;
+      previewTargetNodeId = targetId;
+      if (previewPathCache.has(cacheKey)) {
+        currentPreviewFeatures = previewPathCache.get(cacheKey)?.features || [];
+        map.getSource("attack-preview")?.setData(previewPathCache.get(cacheKey));
+        updateSelectionStatus();
+        return;
+      }
+      abortPreviewPathRequest();
+      previewTargetNodeId = targetId;
+      map.getSource("attack-preview")?.setData(emptyFeatureCollection());
+      setStatus(`Loading the road path to node ${targetId}...`);
+      const controller = new AbortController();
+      activePreviewPathAbortController = controller;
+      const requestVersion = ++previewPathRequestVersion;
+      try {
+        const payload = await fetchJson(CONNECTION_PREVIEW_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            token: sessionToken,
+            fromNodeId: selectedNodeId,
+            toNodeId: targetId,
+          }),
+          signal: controller.signal,
+        });
+        if (
+          controller.signal.aborted
+          || requestVersion !== previewPathRequestVersion
+          || previewTargetNodeId !== targetId
+        ) {
+          return;
+        }
+        const pathData = payload.path || emptyFeatureCollection();
+        previewPathCache.set(cacheKey, pathData);
+      currentPreviewFeatures = pathData.features || [];
+        map.getSource("attack-preview")?.setData(pathData);
+        updateSelectionStatus();
+      } catch (error) {
+        if (controller.signal.aborted) {
+          return;
+        }
+        previewTargetNodeId = null;
+        map.getSource("attack-preview")?.setData(emptyFeatureCollection());
+        setStatus(`Road preview failed: ${error.message}`);
+      } finally {
+        if (activePreviewPathAbortController === controller) {
+          activePreviewPathAbortController = null;
+        }
+      }
+    }
+
+    function armSelectedNodeConnection() {
+      if (!selectedNodeFeature) {
+        setStatus("Select one of your green nodes first.");
+        return;
+      }
+      setStatus("Use the node info panel below to connect from the selected node.");
+    }
+
+    function cancelConnectionPreview() {
+      if (!selectedNodeFeature) {
+        clearSelection(defaultStatusMessage());
+        return;
+      }
+      connectPreviewMode = false;
+      clearPreviewLine();
+      updateSelectionStatus();
+    }
+
+    function handleNodeHoverPreview(event) {
+      if (!connectPreviewMode || !selectedNodeFeature) {
+        return;
+      }
+      const feature = event.features?.[0];
+      if (!feature) {
+        return;
+      }
+      const targetId = String(feature.properties?.id || "");
+      if (!connectableNodeIds.has(targetId) || targetId === selectedNodeId) {
+        clearPreviewLine();
+        updateSelectionStatus();
+        return;
+      }
+      void setPreviewTarget(feature);
+    }
+
+    function handleNodeLeave() {
+      map.getCanvas().style.cursor = "";
+      if (connectPreviewMode && selectedNodeFeature) {
+        clearPreviewLine();
+        updateSelectionStatus();
+      }
+    }
+
+    async function loadGenerationTargetFeatures(region) {
+      try {
+        const collection = await loadStateBoundaryCollection();
+        const features = preciseGenerationTargetFeatures(region, collection);
+        if (features.length) {
+          return features;
+        }
+      } catch (error) {
+        console.warn("Falling back to query-bound overlay.", error);
+      }
+      return fallbackGenerationTargetFeatures(region);
+    }
+
+    function clamp(value, min, max) { return Math.min(max, Math.max(min, value)); }
+    function lonToTileX(lon, zoom) { return Math.floor(((lon + 180) / 360) * (2 ** zoom)); }
+    function latToTileY(lat, zoom) {
+      const rad = lat * Math.PI / 180;
+      const value = (1 - Math.log(Math.tan(rad) + (1 / Math.cos(rad))) / Math.PI) / 2;
+      return Math.floor(value * (2 ** zoom));
+    }
+    function currentTileRequests() {
+      if (map.getZoom() < NODE_MIN_ZOOM) {
+        return [];
+      }
+      const zoom = clamp(Math.floor(map.getZoom()) + NODE_DATA_ZOOM_OFFSET, NODE_DATA_MIN_ZOOM, NODE_DATA_MAX_ZOOM);
+      const bounds = map.getBounds();
+      const minX = lonToTileX(bounds.getWest(), zoom);
+      const maxX = lonToTileX(bounds.getEast(), zoom);
+      const minY = latToTileY(bounds.getNorth(), zoom);
+      const maxY = latToTileY(bounds.getSouth(), zoom);
+      const center = map.getCenter();
+      const centerX = ((center.lng + 180) / 360) * (2 ** zoom);
+      const centerY = ((1 - Math.log(Math.tan(center.lat * Math.PI / 180) + (1 / Math.cos(center.lat * Math.PI / 180))) / Math.PI) / 2) * (2 ** zoom);
+      const tiles = [];
+      for (let x = minX; x <= maxX; x += 1) {
+        for (let y = minY; y <= maxY; y += 1) {
+          const dx = (x + 0.5) - centerX;
+          const dy = (y + 0.5) - centerY;
+          tiles.push({ z: zoom, x, y, distance: (dx * dx) + (dy * dy) });
+        }
+      }
+      tiles.sort((a, b) => a.distance - b.distance);
+      return tiles.slice(0, MAX_VISIBLE_NODE_TILES).map(({ z, x, y }) => ({ z, x, y }));
+    }
+
+    function pointDistanceKm(a, b) {
+      const lonDelta = (b[0] - a[0]) * Math.cos((((a[1] + b[1]) / 2) * Math.PI) / 180);
+      const latDelta = b[1] - a[1];
+      return Math.sqrt((lonDelta * 111.32) ** 2 + (latDelta * 110.57) ** 2);
+    }
+
+    function segmentBearingDegrees(start, end) {
+      const lonDelta = (end[0] - start[0]) * Math.cos((((start[1] + end[1]) / 2) * Math.PI) / 180);
+      const latDelta = end[1] - start[1];
+      const degrees = Math.atan2(-latDelta, lonDelta) * 180 / Math.PI;
+      return (degrees + 360) % 360;
+    }
+
+    function pointAlongLine(coords, distanceKm) {
+      if (!Array.isArray(coords) || coords.length < 2) {
+        return null;
+      }
+      let remaining = Math.max(0, distanceKm);
+      for (let index = 1; index < coords.length; index += 1) {
+        const start = coords[index - 1];
+        const end = coords[index];
+        const segmentKm = pointDistanceKm(start, end);
+        if (segmentKm <= 0) {
+          continue;
+        }
+        if (remaining <= segmentKm) {
+          const ratio = remaining / segmentKm;
+          return {
+            coordinates: [
+              start[0] + ((end[0] - start[0]) * ratio),
+              start[1] + ((end[1] - start[1]) * ratio),
+            ],
+            bearing: segmentBearingDegrees(start, end),
+            segmentStart: start,
+            segmentEnd: end,
+          };
+        }
+        remaining -= segmentKm;
+      }
+      const last = coords[coords.length - 1];
+      const beforeLast = coords[coords.length - 2];
+      return {
+        coordinates: last,
+        bearing: segmentBearingDegrees(beforeLast, last),
+        segmentStart: beforeLast,
+        segmentEnd: last,
+      };
+    }
+
+    function ensureConnectionCanvasSize() {
+      const rect = connectionCanvasEl.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const nextWidth = Math.max(1, Math.round(rect.width * dpr));
+      const nextHeight = Math.max(1, Math.round(rect.height * dpr));
+      if (connectionCanvasEl.width !== nextWidth || connectionCanvasEl.height !== nextHeight) {
+        connectionCanvasEl.width = nextWidth;
+        connectionCanvasEl.height = nextHeight;
+        connectionCanvasContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+      }
+    }
+
+    function connectionLineColor(feature, alpha = 1) {
+      const mode = String(feature?.properties?.mode || "");
+      const ownerState = String(feature?.properties?.ownerState || "");
+      if (mode === "transfer") {
+        return `rgba(56, 189, 248, ${alpha})`;
+      }
+      if (ownerState === "self") {
+        return `rgba(34, 197, 94, ${alpha})`;
+      }
+      return `rgba(239, 68, 68, ${alpha})`;
+    }
+
+    function drawConnectionPath(coords, color, width, dash = []) {
+      if (!Array.isArray(coords) || coords.length < 2) {
+        return;
+      }
+      connectionCanvasContext.beginPath();
+      connectionCanvasContext.setLineDash(dash);
+      let drewPoint = false;
+      for (let index = 0; index < coords.length; index += 1) {
+        const projected = map.project(coords[index]);
+        if (!Number.isFinite(projected.x) || !Number.isFinite(projected.y)) {
+          continue;
+        }
+        if (!drewPoint) {
+          connectionCanvasContext.moveTo(projected.x, projected.y);
+          drewPoint = true;
+        } else {
+          connectionCanvasContext.lineTo(projected.x, projected.y);
+        }
+      }
+      if (!drewPoint) {
+        connectionCanvasContext.setLineDash([]);
+        return;
+      }
+      connectionCanvasContext.strokeStyle = color;
+      connectionCanvasContext.lineWidth = width;
+      connectionCanvasContext.lineJoin = "round";
+      connectionCanvasContext.lineCap = "round";
+      connectionCanvasContext.stroke();
+      connectionCanvasContext.setLineDash([]);
+    }
+
+    function drawArrowHead(point, color, scale = 1) {
+      if (!point?.segmentStart || !point?.segmentEnd) {
+        return;
+      }
+      const start = map.project(point.segmentStart);
+      const end = map.project(point.segmentEnd);
+      const center = map.project(point.coordinates);
+      const angle = Math.atan2(end.y - start.y, end.x - start.x);
+      const zoom = map.getZoom();
+      const size = Math.max(8, Math.min(16, 5 + (zoom * 0.55))) * scale;
+      connectionCanvasContext.save();
+      connectionCanvasContext.translate(center.x, center.y);
+      connectionCanvasContext.rotate(angle);
+      connectionCanvasContext.beginPath();
+      connectionCanvasContext.moveTo(size, 0);
+      connectionCanvasContext.lineTo(-size * 0.65, size * 0.55);
+      connectionCanvasContext.lineTo(-size * 0.65, -size * 0.55);
+      connectionCanvasContext.closePath();
+      connectionCanvasContext.fillStyle = color;
+      connectionCanvasContext.strokeStyle = "rgba(15, 23, 42, 0.96)";
+      connectionCanvasContext.lineWidth = 1.1;
+      connectionCanvasContext.fill();
+      connectionCanvasContext.stroke();
+      connectionCanvasContext.restore();
+    }
+
+    function renderAttackArrows(timestampMs = Date.now()) {
+      ensureConnectionCanvasSize();
+      connectionCanvasContext.clearRect(0, 0, connectionCanvasEl.clientWidth, connectionCanvasEl.clientHeight);
+      const zoomWidth = Math.max(2.4, Math.min(5.2, 1.1 + (map.getZoom() * 0.2)));
+      for (const previewFeature of currentPreviewFeatures) {
+        drawConnectionPath(previewFeature?.geometry?.coordinates, "rgba(203, 213, 225, 0.92)", Math.max(2, zoomWidth - 0.5), [5, 7]);
+      }
+      for (const attackFeature of currentAttackFeatures) {
+        const coords = attackFeature?.geometry?.coordinates;
+        if (!Array.isArray(coords) || coords.length < 2) {
+          continue;
+        }
+        drawConnectionPath(coords, connectionLineColor(attackFeature, 0.95), zoomWidth);
+        let totalKm = 0;
+        for (let index = 1; index < coords.length; index += 1) {
+          totalKm += pointDistanceKm(coords[index - 1], coords[index]);
+        }
+        if (totalKm <= 0) {
+          continue;
+        }
+        const createdAtMs = Number(attackFeature?.properties?.createdAt || 0);
+        const midpointKm = totalKm / 2;
+        const point = pointAlongLine(coords, midpointKm);
+        if (point) {
+          const pulse = 1 + (0.12 * Math.sin((timestampMs - createdAtMs) / 260));
+          drawArrowHead(point, connectionLineColor(attackFeature, 1), pulse);
+        }
+      }
+      attackArrowAnimationFrame = window.requestAnimationFrame(renderAttackArrows);
+    }
+
+    function applyBuildStatus(buildStatus) {
+      const current = Number(buildStatus.current || 0);
+      const total = Number(buildStatus.total || 0);
+      const percent = total > 0 ? Math.round((current / total) * 100) : 0;
+      const label = `${current.toLocaleString()} / ${total.toLocaleString()}`;
+      loadingMessageEl.textContent = buildStatus.message || "Building nodes...";
+      loadingProgressTextEl.textContent = label;
+      loadingProgressPercentEl.textContent = `${percent}%`;
+      loadingProgressFillEl.classList.remove("indeterminate");
+      loadingProgressFillEl.style.width = `${percent}%`;
+      buildProgressInlineEl.textContent = label;
+      tileProgressFillEl.classList.remove("indeterminate");
+      tileProgressFillEl.style.width = `${percent}%`;
+      previewNodeCountEl.textContent = Number(buildStatus.node_count || 0).toLocaleString();
+      try {
+        localStorage.setItem(LAST_BUILD_STATUS_KEY, JSON.stringify(buildStatus));
+      } catch {}
+    }
+
+    function applyBuildRetryState(error) {
+      const retryMs = error.retryAfterMs || NETWORK_RETRY_MS;
+      const retryLabel = formatRetryDelay(retryMs);
+      loadingMessageEl.textContent = `Build status unavailable (${error.message}). Retrying in ${retryLabel}.`;
+      loadingProgressFillEl.classList.add("indeterminate");
+      tileProgressFillEl.classList.add("indeterminate");
+      setStatus(`Build polling failed: ${error.message}. Retrying in ${retryLabel}.`);
+    }
+
+    function focusRegion(region) {
+      const initialBounds = Array.isArray(region.query_bounds) && region.query_bounds.length
+        ? region.query_bounds[0]
+        : region.bounds;
+      const centerLon = (initialBounds.west + initialBounds.east) / 2;
+      const centerLat = (initialBounds.south + initialBounds.north) / 2;
+      map.easeTo({
+        center: [centerLon, centerLat],
+        zoom: Math.max(NODE_MIN_ZOOM + 0.3, 11.8),
+        duration: 0,
+      });
+    }
+
+    function focusOwnedNodes(features, force = false) {
+      if (!features.length) return;
+      if (!force && autoFocusedPlayerId && currentPlayerId === autoFocusedPlayerId) return;
+
+      const coords = features
+        .map((feature) => feature.geometry?.coordinates)
+        .filter((coords) => Array.isArray(coords) && coords.length >= 2);
+      if (!coords.length) return;
+
+      autoFocusedPlayerId = currentPlayerId || autoFocusedPlayerId;
+      saveOwnedView(features);
+      if (coords.length === 1) {
+        map.flyTo({
+          center: coords[0],
+          zoom: 13.8,
+          essential: true,
+        });
+        return;
+      }
+
+      let minLon = coords[0][0];
+      let maxLon = coords[0][0];
+      let minLat = coords[0][1];
+      let maxLat = coords[0][1];
+      for (const [lon, lat] of coords) {
+        minLon = Math.min(minLon, lon);
+        maxLon = Math.max(maxLon, lon);
+        minLat = Math.min(minLat, lat);
+        maxLat = Math.max(maxLat, lat);
+      }
+      map.fitBounds([[minLon, minLat], [maxLon, maxLat]], {
+        padding: { top: 90, bottom: 90, left: 90, right: 380 },
+        duration: 900,
+        maxZoom: 13.8,
+      });
+    }
+
+    async function loadRegionManifest() {
+      activeRegion = await fetchJson(REGION_MANIFEST_URL, { cache: "no-store" });
+      const region = activeRegion.active_region;
+      const generationFeatures = await loadGenerationTargetFeatures(region);
+      currentGenerationFeatures = generationFeatures;
+      map.getSource("region-overview").setData({ type: "FeatureCollection", features: generationFeatures });
+      map.getSource("generation-target").setData({ type: "FeatureCollection", features: generationFeatures });
+      const stateLabel = (region.states || []).join(", ");
+      document.title = `${region.name} Node Game`;
+      panelTitleEl.textContent = `${region.name} Game`;
+      regionTextEl.textContent = stateLabel;
+      loadingMessageEl.textContent = `Preparing nodes for ${stateLabel}...`;
+      if (sessionToken && focusStoredOwnedView()) {
+        return;
+      }
+      if (!sessionToken) {
+        focusRegion(region);
+        return;
+      }
+      focusRegion(region);
+    }
+
+    async function loadQueryBlocks() {
+      try {
+        const geojson = await fetchJson(`/${activeRegion.active_region.prepared_root}/query_tiles_status.geojson`, { cache: "no-store" });
+        map.getSource("query-blocks").setData(clipQueryBlocksToGeneration(geojson, currentGenerationFeatures));
+      } catch {
+        map.getSource("query-blocks").setData(emptyFeatureCollection());
+      }
+    }
+
+    async function handleNodeClick(event) {
+      const feature = event.features?.[0];
+      if (!feature) return;
+      const props = feature.properties || {};
+      const nodeId = String(props.id);
+      if (!sessionToken) {
+        inspectNode(feature);
+        setStatus("Log in first, then click one of your green nodes to open its connect panel.");
+        return;
+      }
+      if (props.ownerState === "self") {
+        if (selectedNodeId === nodeId) {
+          clearSelection(`Cleared node ${nodeId}. Click another green node to pick a sender.`);
+          inspectNode(feature);
+          return;
+        }
+        inspectNode(feature);
+        selectedNodeId = nodeId;
+        selectedNodeFeature = feature;
+        connectPreviewMode = false;
+        previewPathCache.clear();
+        selectedNodeTextEl.textContent = selectedNodeSummary(feature);
+        setSendPerTickValue(findAttackFeature(nodeId, inspectedNodeId)?.properties?.sendPerTick || sendPerTickInput.value);
+        clearPreviewLine();
+        clearConnectableTargets();
+        setStatus(`Selected node ${nodeId}. Use the adjacent target list in the node info panel to connect.`);
+        void refreshSelectedNodeTargets();
+        updateRouteControls(feature);
+        updateSelectionStatus();
+        return;
+      }
+      if (selectedNodeId) {
+        setStatus(`Node ${selectedNodeId} is selected as your sender. Use its node info panel to connect.`);
+        return;
+      }
+      inspectNode(feature);
+    }
+
+    async function refreshBuildProgress() {
+      const buildStatus = await fetchJson(BUILD_STATUS_URL, { cache: "no-store" });
+      applyBuildStatus(buildStatus);
+      await loadQueryBlocks();
+    }
+
+    function syncSelectionFromRenderedFeatures(features) {
+      if (!selectedNodeId) {
+        return;
+      }
+      const refreshedSelection = features.find((feature) => String(feature.properties?.id || "") === selectedNodeId) || null;
+      if (refreshedSelection && refreshedSelection.properties?.ownerState === "self") {
+        selectedNodeFeature = refreshedSelection;
+        selectedNodeTextEl.textContent = selectedNodeSummary(refreshedSelection);
+        if (connectPreviewMode && previewTargetNodeId) {
+          const refreshedTarget = features.find((feature) => String(feature.properties?.id || "") === previewTargetNodeId) || null;
+          if (refreshedTarget && connectableNodeIds.has(previewTargetNodeId)) {
+            void setPreviewTarget(refreshedTarget);
+          } else {
+            clearPreviewLine();
+          }
+        }
+      } else if (selectedNodeFeature && refreshedSelection && refreshedSelection.properties?.ownerState !== "self") {
+        clearSelection("Selected node is no longer yours.");
+      }
+    }
+
+    function syncInspectedNodeFromRenderedFeatures(features) {
+      if (!inspectedNodeId) {
+        return;
+      }
+      const refreshedNode = features.find((feature) => String(feature.properties?.id || "") === inspectedNodeId) || null;
+      updateNodeInfo(refreshedNode);
+      if (!refreshedNode) {
+        inspectedNodeId = null;
+      }
+    }
+
+    function renderVisibleNodeFeatures(features, requestVersion) {
+      if (requestVersion !== visibleTileRefreshVersion) {
+        return;
+      }
+      const orderedFeatures = [...features].sort((left, right) => String(left?.properties?.id || "").localeCompare(String(right?.properties?.id || "")));
+      const displayFeatures = spreadOverlappingNodeFeatures(orderedFeatures);
+      renderedNodeFeatures = displayFeatures;
+      syncInspectedNodeFromRenderedFeatures(displayFeatures);
+      syncSelectionFromRenderedFeatures(displayFeatures);
+      map.getSource("game-nodes").setData({ type: "FeatureCollection", features: displayFeatures });
+      renderedNodeCountEl.textContent = displayFeatures.length.toLocaleString();
+      if (selectedNodeFeature && sessionToken && connectPreviewMode) {
+        scheduleConnectableTargetsRefresh(80);
+      } else {
+        clearConnectableTargets();
+      }
+    }
+
+    async function refreshVisibleTiles() {
+      if (map.getZoom() < NODE_MIN_ZOOM) {
+        activeVisibleTileAbortController?.abort();
+        activeVisibleTileAbortController = null;
+        renderedNodeFeatures = [];
+        inspectedNodeId = null;
+        updateNodeInfo(null);
+        map.getSource("game-nodes").setData(emptyFeatureCollection());
+        updateClickedNodeHighlight(null);
+        clearConnectableTargets();
+        clearPreviewLine();
+        renderedNodeCountEl.textContent = "0";
+        setStatus(ZOOM_IN_MESSAGE);
+        return;
+      }
+      const requests = currentTileRequests();
+      lastVisibleTileRefreshStartedAt = Date.now();
+      const requestVersion = ++visibleTileRefreshVersion;
+      activeVisibleTileAbortController?.abort();
+      const requestAbortController = new AbortController();
+      activeVisibleTileAbortController = requestAbortController;
+      const suffix = sessionToken ? `&token=${encodeURIComponent(sessionToken)}` : "";
+      const features = [];
+      const seen = new Set();
+      const mergePayload = (payload) => {
+        let changed = false;
+        for (const feature of payload.nodes?.features || []) {
+          const id = String(feature.properties?.id || "");
+          if (!id || seen.has(id)) {
+            continue;
+          }
+          seen.add(id);
+          features.push(feature);
+          changed = true;
+        }
+        if (changed) {
+          renderVisibleNodeFeatures(features, requestVersion);
+        }
+      };
+      const results = await Promise.allSettled(
+        requests.map(async ({ z, x, y }) => {
+          const payload = await fetchJson(`${NODE_TILE_URL}?z=${z}&x=${x}&y=${y}${suffix}`, {
+            cache: "no-store",
+            signal: requestAbortController.signal,
+          });
+          if (requestVersion !== visibleTileRefreshVersion || requestAbortController.signal.aborted) {
+            return null;
+          }
+          mergePayload(payload);
+          return payload;
+        })
+      );
+      if (requestVersion !== visibleTileRefreshVersion) {
+        return;
+      }
+      const payloads = results
+        .filter((result) => result.status === "fulfilled")
+        .map((result) => result.value)
+        .filter(Boolean);
+      if (!payloads.length) {
+        if (requestAbortController.signal.aborted) {
+          return;
+        }
+        const firstFailure = results.find((result) => result.status === "rejected");
+        throw firstFailure?.reason || new Error("No node tiles loaded.");
+      }
+      renderVisibleNodeFeatures(features, requestVersion);
+    }
+
+    async function maybeRefreshVisibleTiles(force = false) {
+      if (!force && Date.now() - lastVisibleTileRefreshStartedAt < VISIBLE_TILE_REFRESH_COOLDOWN_MS) {
+        return;
+      }
+      await refreshVisibleTiles();
+    }
+
+    function scheduleVisibleTileRefresh(delayMs = 0, force = false) {
+      if (visibleTileRefreshTimer) {
+        window.clearTimeout(visibleTileRefreshTimer);
+      }
+      visibleTileRefreshTimer = window.setTimeout(() => {
+        visibleTileRefreshTimer = null;
+        maybeRefreshVisibleTiles(force).catch((error) => setStatus(`Tile refresh failed: ${error.message}`));
+      }, delayMs);
+    }
+
+    async function refreshGameState() {
+      try {
+        const query = sessionToken
+          ? `?token=${encodeURIComponent(sessionToken)}&view=summary`
+          : "?view=summary";
+        const state = await fetchJson(`${GAME_STATE_URL}${query}`, { cache: "no-store" });
+        currentPlayerId = state.player?.id || null;
+        const ownedFeatures = state.ownedNodes?.features || [];
+        lastOwnedFeatures = ownedFeatures;
+        setAttackFeatures(state.attacks?.features || []);
+        authSummaryEl.textContent = state.player
+          ? `Logged in as ${state.player.username}. You own ${ownedFeatures.length} green nodes.`
+          : "Register or log in to claim 10 starting nodes.";
+        activeAttackCountEl.textContent = (state.attacks?.features || []).length.toLocaleString();
+        if (state.player && ownedFeatures.length) {
+          if (!panelAutoHiddenForSession) {
+            hideMainPanel(true);
+            panelAutoHiddenForSession = true;
+          }
+          focusOwnedNodes(ownedFeatures);
+        } else if (state.player) {
+          if (!panelAutoHiddenForSession) {
+            hideMainPanel(true);
+            panelAutoHiddenForSession = true;
+          }
+        } else {
+          panelAutoHiddenForSession = false;
+        }
+        scheduleVisibleTileRefresh(state.player ? 0 : 200);
+        updateNodeInfo(renderedNodeFeatures.find((feature) => String(feature.properties?.id || "") === inspectedNodeId) || null);
+        updateRouteControls(renderedNodeFeatures.find((feature) => String(feature.properties?.id || "") === inspectedNodeId) || null);
+        renderSelectedNodeTargets();
+        updateSelectionStatus();
+      } catch (error) {
+        if (error.retryable) {
+          throw error;
+        }
+        sessionToken = "";
+        currentPlayerId = null;
+        autoFocusedPlayerId = null;
+        lastOwnedFeatures = [];
+        selectedNodeId = null;
+        selectedNodeFeature = null;
+        connectPreviewMode = false;
+        setAttackFeatures([]);
+        previewPathCache.clear();
+        clearConnectableTargets();
+        clearPreviewLine();
+        localStorage.removeItem(SESSION_KEY);
+        authSummaryEl.textContent = error.message;
+        showMainPanel(true);
+        setStatus(`Session cleared: ${error.message}`);
+      }
+    }
+
+    async function buildPollLoop() {
+      try {
+        await refreshBuildProgress();
+        nextBuildPollDelayMs = BUILD_POLL_MS;
+      } catch (error) {
+        nextBuildPollDelayMs = error.retryable ? (error.retryAfterMs || NETWORK_RETRY_MS) : BUILD_POLL_MS;
+        applyBuildRetryState(error);
+      } finally {
+        buildPollTimer = window.setTimeout(buildPollLoop, nextBuildPollDelayMs);
+      }
+    }
+
+    async function gamePollLoop() {
+      try {
+        await refreshGameState();
+        nextGamePollDelayMs = GAME_POLL_MS;
+      } catch (error) {
+        nextGamePollDelayMs = error.retryable ? (error.retryAfterMs || NETWORK_RETRY_MS) : GAME_POLL_MS;
+        setStatus(`Game polling failed: ${error.message}. Retrying in ${formatRetryDelay(nextGamePollDelayMs)}.`);
+      } finally {
+        gamePollTimer = window.setTimeout(gamePollLoop, nextGamePollDelayMs);
+      }
+    }
+
+    async function submitAuth(endpoint) {
+      const actionLabel = endpoint === LOGIN_URL ? "Login" : "Register";
+      if (authRequestInFlight) {
+        return;
+      }
+      try {
+        setAuthPending(true, actionLabel);
+        saveLoginFormState();
+        authSummaryEl.textContent = `${actionLabel} in progress...`;
+        const result = await fetchJson(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: usernameInput.value.trim(), password: passwordInput.value }) });
+        sessionToken = result.token;
+        autoFocusedPlayerId = null;
+        panelAutoHiddenForSession = false;
+        localStorage.setItem(SESSION_KEY, sessionToken);
+        saveLoginFormState();
+        authSummaryEl.textContent = `${actionLabel} successful. Loading your nodes...`;
+        hideMainPanel(true);
+        panelAutoHiddenForSession = true;
+        setStatus("Logged in. Loading your nodes...");
+        await refreshGameState();
+        scheduleVisibleTileRefresh(0, true);
+      } catch (error) {
+        saveLoginFormState();
+        authSummaryEl.textContent = error.message;
+        showMainPanel(true);
+      } finally {
+        setAuthPending(false);
+      }
+    }
+
+    registerButton.addEventListener("click", () => submitAuth(REGISTER_URL));
+    loginButton.addEventListener("click", () => submitAuth(LOGIN_URL));
+    usernameInput.addEventListener("input", saveLoginFormState);
+    passwordInput.addEventListener("input", saveLoginFormState);
+    sendPerTickInput.addEventListener("change", () => {
+      setSendPerTickValue(sendPerTickInput.value);
+      updateRouteControls(renderedNodeFeatures.find((feature) => String(feature.properties?.id || "") === inspectedNodeId) || null);
+    });
+    updateRouteRateButton.addEventListener("click", () => {
+      void updateSelectedRouteRate();
+    });
+    nodeRoutesListEl.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-from-node-id][data-to-node-id]");
+      if (!button) {
+        return;
+      }
+      const fromNodeId = button.dataset.fromNodeId || "";
+      const toNodeId = button.dataset.toNodeId || "";
+      if (button.dataset.action === "delete") {
+        void removeAttackConnection(fromNodeId, toNodeId);
+        return;
+      }
+      const input = nodeRoutesListEl.querySelector(`input[data-from-node-id="${fromNodeId}"][data-to-node-id="${toNodeId}"]`);
+      const sendPerTick = normalizeSendPerTick(input?.value || DEFAULT_SEND_PER_TICK);
+      void updateAttackRate(fromNodeId, toNodeId, sendPerTick);
+    });
+    connectionTargetsListEl.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-target-node-id]");
+      if (!button) {
+        return;
+      }
+      void toggleConnectionToTargetNode(button.dataset.targetNodeId || "");
+    });
+    locateNodesButton.addEventListener("click", () => {
+      if (!lastOwnedFeatures.length) {
+        setStatus("Log in first, then generate or load your green nodes before locating them.");
+        return;
+      }
+      focusOwnedNodes(lastOwnedFeatures, true);
+      setStatus("Centered on your green nodes.");
+    });
+    logoutButton.addEventListener("click", () => {
+      sessionToken = "";
+      currentPlayerId = null;
+      autoFocusedPlayerId = null;
+      panelAutoHiddenForSession = false;
+      lastOwnedFeatures = [];
+      localStorage.removeItem(SESSION_KEY);
+      authSummaryEl.textContent = "Register or log in to claim 10 starting nodes.";
+      selectedNodeId = null;
+      selectedNodeFeature = null;
+      connectPreviewMode = false;
+      previewPathCache.clear();
+      selectedNodeTextEl.textContent = "None";
+      inspectedNodeId = null;
+      clearSelectedNodeTargets();
+      updateNodeInfo(null);
+      clearConnectableTargets();
+      map.getSource("game-nodes")?.setData(emptyFeatureCollection());
+      setAttackFeatures([]);
+      map.getSource("attack-preview")?.setData(emptyFeatureCollection());
+      setStatus(defaultStatusMessage());
+      showMainPanel(true);
+      if (activeRegion?.active_region) {
+        focusRegion(activeRegion.active_region);
+      }
+    });
+
+    window.addEventListener("keydown", (event) => {
+      const targetTag = String(event.target?.tagName || "").toUpperCase();
+      if (targetTag === "INPUT" || targetTag === "TEXTAREA") {
+        return;
+      }
+      if (event.code === "Space") {
+        event.preventDefault();
+        setStatus("Use the node info panel to connect from the selected node.");
+      } else if (event.code === "Escape") {
+        cancelConnectionPreview();
+      }
+    });
+    window.addEventListener("online", () => {
+      nextBuildPollDelayMs = BUILD_POLL_MS;
+      nextGamePollDelayMs = GAME_POLL_MS;
+      if (buildPollTimer) window.clearTimeout(buildPollTimer);
+      if (gamePollTimer) window.clearTimeout(gamePollTimer);
+      scheduleVisibleTileRefresh(0, true);
+      buildPollLoop();
+      gamePollLoop();
+    });
+
+    map.on("load", async () => {
+      const style = map.getStyle();
+      for (const layer of style.layers || []) {
+        const id = String(layer.id || "").toLowerCase();
+        const type = String(layer.type || "").toLowerCase();
+        if (type === "symbol" || id.includes("poi") || id.includes("shop") || id.includes("building")) map.setLayoutProperty(layer.id, "visibility", "none");
+      }
+
+      map.addSource("region-overview", { type: "geojson", data: emptyFeatureCollection() });
+      map.addSource("generation-target", { type: "geojson", data: emptyFeatureCollection() });
+      map.addSource("query-blocks", { type: "geojson", data: emptyFeatureCollection() });
+      map.addSource("game-nodes", { type: "geojson", data: emptyFeatureCollection() });
+      map.addSource("connectable-nodes", { type: "geojson", data: emptyFeatureCollection() });
+      map.addSource("selected-node", { type: "geojson", data: emptyFeatureCollection() });
+      map.addSource("attack-preview", { type: "geojson", data: emptyFeatureCollection() });
+      map.addSource("attack-lines", { type: "geojson", data: emptyFeatureCollection() });
+      map.addSource("attack-flow-arrows", { type: "geojson", data: emptyFeatureCollection() });
+
+      map.addLayer({ id: "region-overview-fill", type: "fill", source: "region-overview", paint: { "fill-color": "#ef4444", "fill-opacity": 0.05 }, maxzoom: 8 });
+      map.addLayer({ id: "region-overview-line", type: "line", source: "region-overview", paint: { "line-color": "#ef4444", "line-width": 2 }, maxzoom: 8 });
+      map.addLayer({ id: "generation-target-fill", type: "fill", source: "generation-target", paint: { "fill-color": "#ef4444", "fill-opacity": 0.15 }, maxzoom: 10 });
+      map.addLayer({ id: "generation-target-line", type: "line", source: "generation-target", paint: { "line-color": "#ef4444", "line-width": 1.6 }, maxzoom: 10 });
+      map.addLayer({ id: "query-blocks-fill", type: "fill", source: "query-blocks", paint: { "fill-color": "#22c55e", "fill-opacity": ["case", ["boolean", ["get", "completed"], false], 0.25, 0.0] }, maxzoom: 10 });
+      map.addLayer({ id: "query-blocks-line", type: "line", source: "query-blocks", paint: { "line-color": "#16a34a", "line-width": ["case", ["boolean", ["get", "completed"], false], 1.1, 0.0] }, maxzoom: 10 });
+      map.addLayer({ id: "connectable-node-rings", type: "circle", source: "connectable-nodes", minzoom: NODE_MIN_ZOOM, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], NODE_MIN_ZOOM, 12, 13, 15, 16, 18], "circle-color": "rgba(0,0,0,0)", "circle-stroke-color": "rgba(0,0,0,0)", "circle-stroke-width": 0, "circle-opacity": 0 } });
+      map.addLayer({ id: "game-node-circles", type: "circle", source: "game-nodes", minzoom: NODE_MIN_ZOOM, layout: { "circle-sort-key": ["get", "army"] }, paint: { "circle-color": ["case", ["==", ["get", "ownerState"], "self"], "#22c55e", ["==", ["get", "ownerState"], "enemy"], "#8b5cf6", "#e2e8f0"], "circle-radius": ["interpolate", ["linear"], ["zoom"], NODE_MIN_ZOOM, 10.5, 13, 13.5, 16, 17.5], "circle-stroke-color": "#0f172a", "circle-stroke-width": 1.8, "circle-opacity": 0.96 } });
+      map.addLayer({ id: "selected-node-ring", type: "circle", source: "selected-node", minzoom: NODE_MIN_ZOOM, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], NODE_MIN_ZOOM, 16, 13, 20, 16, 25], "circle-color": "rgba(0,0,0,0)", "circle-stroke-color": "#facc15", "circle-stroke-width": 3.2, "circle-opacity": 1 } });
+      map.addLayer({ id: "game-node-labels", type: "symbol", source: "game-nodes", minzoom: 12, layout: { "text-field": ["get", "armyLabel"], "text-font": ["Noto Sans Bold"], "text-size": ["interpolate", ["linear"], ["zoom"], 12, 9.5, 13, 11, 16, 13], "text-allow-overlap": true, "text-ignore-placement": true, "symbol-sort-key": ["get", "army"] }, paint: { "text-color": ["case", ["==", ["get", "ownerState"], "neutral"], "#111111", "#f8fafc"], "text-halo-color": ["case", ["==", ["get", "ownerState"], "neutral"], "rgba(255,255,255,0.55)", "rgba(15,23,42,0.65)"], "text-halo-width": 0.6 } });
+
+      map.on("click", "connectable-node-rings", handleNodeClick);
+      map.on("click", "game-node-circles", handleNodeClick);
+      map.on("click", "game-node-labels", handleNodeClick);
+      map.on("mouseenter", "connectable-node-rings", () => { map.getCanvas().style.cursor = "pointer"; });
+      map.on("mousemove", "connectable-node-rings", handleNodeHoverPreview);
+      map.on("mouseleave", "connectable-node-rings", handleNodeLeave);
+      map.on("mouseenter", "game-node-circles", () => { map.getCanvas().style.cursor = "pointer"; });
+      map.on("mousemove", "game-node-circles", handleNodeHoverPreview);
+      map.on("mouseleave", "game-node-circles", handleNodeLeave);
+      map.on("mouseenter", "game-node-labels", () => { map.getCanvas().style.cursor = "pointer"; });
+      map.on("mousemove", "game-node-labels", handleNodeHoverPreview);
+      map.on("mouseleave", "game-node-labels", handleNodeLeave);
+      map.on("click", (event) => {
+        const hitFeatures = map.queryRenderedFeatures(event.point, {
+          layers: ["connectable-node-rings", "game-node-circles", "game-node-labels"],
+        });
+        if (hitFeatures.length) {
+          return;
+        }
+        inspectedNodeId = null;
+        updateNodeInfo(null);
+      });
+      map.on("moveend", () => { scheduleVisibleTileRefresh(); });
+
+      installButtonPressEffects();
+      loadLoginFormState();
+      setSendPerTickValue(DEFAULT_SEND_PER_TICK);
+      loadPanelState();
+      loadTopBarState();
+      const storedBuildStatus = loadStoredBuildStatus();
+      if (storedBuildStatus) {
+        applyBuildStatus(storedBuildStatus);
+      }
+      await loadRegionManifest();
+      scheduleVisibleTileRefresh(0, true);
+      try {
+        await refreshBuildProgress();
+      } catch (error) {
+        nextBuildPollDelayMs = error.retryable ? (error.retryAfterMs || NETWORK_RETRY_MS) : BUILD_POLL_MS;
+        applyBuildRetryState(error);
+      }
+      try {
+        await refreshGameState();
+      } catch (error) {
+        nextGamePollDelayMs = error.retryable ? (error.retryAfterMs || NETWORK_RETRY_MS) : GAME_POLL_MS;
+        setStatus(`Game polling failed: ${error.message}. Retrying in ${formatRetryDelay(nextGamePollDelayMs)}.`);
+      }
+      buildPollLoop();
+      gamePollLoop();
+      if (!attackArrowAnimationFrame) {
+        attackArrowAnimationFrame = window.requestAnimationFrame(renderAttackArrows);
+      }
+      if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+    });
+  </script>
+</body>
+</html>
