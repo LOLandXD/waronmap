@@ -1549,6 +1549,32 @@
       connectionCanvasContext.restore();
     }
 
+    function drawLineRateLabel(point, label, color) {
+      if (!point?.coordinates || !label) {
+        return;
+      }
+      const projected = map.project(point.coordinates);
+      const offsetX = 10;
+      const offsetY = -12;
+      connectionCanvasContext.save();
+      connectionCanvasContext.font = "600 12px Arial, Helvetica, sans-serif";
+      connectionCanvasContext.textAlign = "left";
+      connectionCanvasContext.textBaseline = "middle";
+      const textWidth = connectionCanvasContext.measureText(label).width;
+      const x = projected.x + offsetX;
+      const y = projected.y + offsetY;
+      connectionCanvasContext.fillStyle = "rgba(15, 23, 42, 0.88)";
+      connectionCanvasContext.beginPath();
+      connectionCanvasContext.roundRect(x - 5, y - 9, textWidth + 10, 18, 6);
+      connectionCanvasContext.fill();
+      connectionCanvasContext.strokeStyle = "rgba(148, 163, 184, 0.35)";
+      connectionCanvasContext.lineWidth = 1;
+      connectionCanvasContext.stroke();
+      connectionCanvasContext.fillStyle = color;
+      connectionCanvasContext.fillText(label, x, y);
+      connectionCanvasContext.restore();
+    }
+
     function renderAttackArrows(timestampMs = Date.now()) {
       ensureConnectionCanvasSize();
       connectionCanvasContext.clearRect(0, 0, connectionCanvasEl.clientWidth, connectionCanvasEl.clientHeight);
@@ -1569,12 +1595,26 @@
         if (totalKm <= 0) {
           continue;
         }
+        const sendPerTick = normalizeSendPerTick(attackFeature?.properties?.sendPerTick || DEFAULT_SEND_PER_TICK);
+        const color = connectionLineColor(attackFeature, 1);
+        const durationMs = Math.max(520, 2800 - (sendPerTick * 9));
+        const spacingKm = Math.max(0.16, Math.min(totalKm / 4, 0.65));
+        const arrowCount = Math.max(2, Math.min(9, Math.ceil(totalKm / spacingKm)));
         const createdAtMs = Number(attackFeature?.properties?.createdAt || 0);
-        const midpointKm = totalKm / 2;
-        const point = pointAlongLine(coords, midpointKm);
-        if (point) {
-          const pulse = 1 + (0.12 * Math.sin((timestampMs - createdAtMs) / 260));
-          drawArrowHead(point, connectionLineColor(attackFeature, 1), pulse);
+        const phaseKm = ((Math.max(0, timestampMs - createdAtMs) % durationMs) / durationMs) * spacingKm;
+        for (let index = 0; index < arrowCount; index += 1) {
+          const alongKm = (phaseKm + (index * spacingKm)) % totalKm;
+          const point = pointAlongLine(coords, alongKm);
+          if (!point) {
+            continue;
+          }
+          drawArrowHead(point, color, 0.88);
+        }
+        const labelPoint = pointAlongLine(coords, Math.min(totalKm * 0.58, totalKm - 0.001));
+        if (labelPoint) {
+          const perSecond = sendPerTick / 3;
+          const rateLabel = `${Number.isInteger(perSecond) ? perSecond.toLocaleString() : perSecond.toFixed(1)}/s`;
+          drawLineRateLabel(labelPoint, rateLabel, color);
         }
       }
       attackArrowAnimationFrame = window.requestAnimationFrame(renderAttackArrows);

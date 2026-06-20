@@ -1,5 +1,5 @@
-const APP_SHELL_CACHE = "new-england-four-app-v31";
-const DATA_CACHE = "new-england-four-data-v31";
+const APP_SHELL_CACHE = "new-england-four-app-v32";
+const DATA_CACHE = "new-england-four-data-v32";
 const APP_SHELL_FILES = [
   "/",
   "/openfreemap_viewer.html",
