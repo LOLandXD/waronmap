@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use url::form_urlencoded;
 
-const WORLD_TICK_MS: u64 = 3000;
+const WORLD_TICK_MS: u64 = 2500;
 const REPO_REFRESH_MS: i64 = 10_000;
 
 #[derive(Clone, Copy)]

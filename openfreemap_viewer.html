@@ -42,6 +42,12 @@
     .route-row-controls input { margin: 0; width: 86px; }
     .route-row-controls button { padding: 6px 10px; font-size: 12px; }
     .hint { font-size: 12px; color: #94a3b8; }
+    .loading-screen { position: fixed; inset: 0; z-index: 100; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; background: #0f172a; color: #e5eefc; transition: opacity 0.4s ease, visibility 0.4s ease; }
+    .loading-screen.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+    .loading-screen h1 { margin: 0; font-size: 22px; }
+    .loading-screen p { margin: 0; font-size: 14px; color: #94a3b8; }
+    .loading-screen .progress-track { width: min(360px, calc(100vw - 48px)); height: 10px; overflow: hidden; border-radius: 999px; background: rgba(148, 163, 184, 0.22); }
+    .loading-screen .progress-fill.indeterminate { width: 100% !important; background: linear-gradient(90deg, rgba(96,165,250,0.35), rgba(37,99,235,0.95), rgba(96,165,250,0.35)); background-size: 200% 100%; animation: progress-shift 1.4s linear infinite; }
     .top-bar-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
     .top-bar-header h1 { margin-bottom: 0; }
     .top-bar-close { flex: 0 0 auto; padding: 6px 10px; font-size: 12px; }
@@ -70,6 +76,11 @@
   </style>
 </head>
 <body>
+  <div id="loadingScreen" class="loading-screen">
+    <h1>Loading War on Map</h1>
+    <p id="loadingScreenStatus">Connecting to game server...</p>
+    <div class="progress-track"><div id="loadingScreenProgress" class="progress-fill indeterminate"></div></div>
+  </div>
   <div id="map"></div>
   <canvas id="connectionCanvas" class="connection-canvas"></canvas>
   <div class="overlay top-bar" id="topBar">
@@ -169,7 +180,7 @@
     const LAST_BUILD_STATUS_KEY = "node-game-build-status-v1";
     const LAST_OWNED_VIEW_KEY = "node-game-owned-view-v1";
     const BUILD_POLL_MS = 3000;
-    const GAME_POLL_MS = 3000;
+    const GAME_POLL_MS = 5500;
     const NETWORK_RETRY_MS = 10 * 60 * 1000;
     const FETCH_TIMEOUT_MS = 30000;
     const WORLD_TICK_SECONDS = 3;
@@ -255,6 +266,8 @@
     let connectPreviewMode = false;
     let nextBuildPollDelayMs = BUILD_POLL_MS;
     let nextGamePollDelayMs = GAME_POLL_MS;
+    let lastWorldUpdateRefreshAt = 0;
+    const WORLD_UPDATE_THROTTLE_MS = 5500;
     let visibleTileRefreshTimer = null;
     let activeVisibleTileAbortController = null;
     let lastVisibleTileRefreshStartedAt = 0;
@@ -270,16 +283,26 @@
     let authRequestInFlight = false;
     let currentAttackFeatures = [];
     let currentPreviewFeatures = [];
+    let cachedEffectiveFlow = null;
+    let cachedEffectiveFlowKey = "";
+    let cachedProjectedPaths = new Map();
+    let cachedProjectedPathsKey = "";
+    let cachedProjectedPoints = new Map();
+    let cachedProjectedPointsKey = "";
     let selectedNodeTargets = [];
     let selectedNodeTargetsRequestVersion = 0;
     let attackArrowAnimationFrame = 0;
+    let lastAttackRenderTime = 0;
+    const ATTACK_RENDER_INTERVAL_MS = 33;
     let hoveredAttackKey = null;
     let hoveredPreviewTargetNodeId = null;
     const nodeTileResponseCache = new Map();
     const connectionCanvasContext = connectionCanvasEl.getContext("2d");
+    const loadingScreenEl = document.getElementById("loadingScreen");
+    const loadingScreenStatusEl = document.getElementById("loadingScreenStatus");
+    const loadingScreenProgressEl = document.getElementById("loadingScreenProgress");
 
-    const map = new maplibregl.Map({ container: "map", style: "https://tiles.openfreemap.org/styles/liberty", center: [-70.5, 43.8], zoom: 11.8 });
-    map.addControl(new maplibregl.NavigationControl(), "top-right");
+    let map = null;
 
     function emptyFeatureCollection() { return { type: "FeatureCollection", features: [] }; }
     function normalizeSendPerTick(value) {
@@ -344,6 +367,59 @@
         String(feature?.properties?.fromNodeId || "") === String(fromNodeId || "")
         && String(feature?.properties?.toNodeId || "") === String(toNodeId || "")
       )) || null;
+    }
+    function isPersonalMovement(targetFeature) {
+      const ownerState = String(targetFeature?.properties?.ownerState || "");
+      return ownerState === "self" || ownerState === "neutral";
+    }
+    function createLocalAttackFeature(fromNodeId, toNodeId, targetFeature, sendPerTick) {
+      const fromFeature = renderedFeatureByNodeId(fromNodeId) || selectedNodeFeature;
+      const fromCoords = actualNodeCoordinates(fromFeature);
+      const toCoords = actualNodeCoordinates(targetFeature);
+      if (!fromCoords || !toCoords) {
+        return null;
+      }
+      const ownerState = String(targetFeature?.properties?.ownerState || "");
+      const mode = ownerState === "self" ? "transfer" : "attack";
+      return {
+        type: "Feature",
+        geometry: { type: "LineString", coordinates: [fromCoords, toCoords] },
+        properties: {
+          id: `local-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+          fromNodeId,
+          toNodeId,
+          mode,
+          ownerState: "self",
+          sendPerTick,
+          createdAt: Date.now(),
+          local: true,
+        },
+      };
+    }
+    function removeLocalAttackFeature(fromNodeId, toNodeId) {
+      const from = String(fromNodeId || "");
+      const to = String(toNodeId || "");
+      currentAttackFeatures = currentAttackFeatures.filter((feature) => !(
+        String(feature?.properties?.fromNodeId || "") === from
+        && String(feature?.properties?.toNodeId || "") === to
+        && feature?.properties?.local
+      ));
+      setAttackFeatures(currentAttackFeatures);
+    }
+    function reconcileLocalAttacks(serverFeatures) {
+      const serverKeys = new Set();
+      for (const feature of serverFeatures || []) {
+        const props = feature?.properties || {};
+        serverKeys.add(`${String(props.fromNodeId || "")}->${String(props.toNodeId || "")}`);
+      }
+      currentAttackFeatures = (currentAttackFeatures || []).filter((feature) => {
+        if (!feature?.properties?.local) {
+          return true;
+        }
+        const props = feature.properties || {};
+        const key = `${String(props.fromNodeId || "")}->${String(props.toNodeId || "")}`;
+        return !serverKeys.has(key);
+      });
     }
     function collapseOverlappingAttackFeatures(features) {
       const grouped = new Map();
@@ -440,6 +516,61 @@
         return attackFeatureKey(left).localeCompare(attackFeatureKey(right));
       });
     }
+    function effectiveFlowCacheKey() {
+      const nodeKey = renderedNodeFeatures
+        .map((feature) => `${feature?.properties?.id || ""}|${feature?.properties?.army || 0}|${feature?.properties?.ownerState || ""}`)
+        .join(",");
+      const attackKey = currentAttackFeatures
+        .map((feature) => `${feature?.properties?.fromNodeId || ""}->${feature?.properties?.toNodeId || ""}|${feature?.properties?.sendPerTick || 0}|${feature?.properties?.mode || ""}`)
+        .join(",");
+      return `${nodeKey}::${attackKey}`;
+    }
+    function getCachedEffectiveFlow() {
+      const key = effectiveFlowCacheKey();
+      if (cachedEffectiveFlow && cachedEffectiveFlowKey === key) {
+        return cachedEffectiveFlow;
+      }
+      const flow = computeEffectiveFlowByAttackKey();
+      cachedEffectiveFlow = flow;
+      cachedEffectiveFlowKey = key;
+      return flow;
+    }
+    function projectedPathsCacheKey() {
+      const transform = map ? map.transform : null;
+      const camera = transform
+        ? `${transform.zoom.toFixed(3)}|${transform.bearing.toFixed(2)}|${transform.pitch.toFixed(2)}|${transform.center.lng.toFixed(5)}|${transform.center.lat.toFixed(5)}`
+        : "";
+      const attackKey = currentAttackFeatures
+        .map((feature) => `${feature?.properties?.fromNodeId || ""}->${feature?.properties?.toNodeId || ""}|${feature?.properties?.id || ""}`)
+        .join(",");
+      const previewKey = currentPreviewFeatures
+        .map((feature) => `preview-${feature?.properties?.fromNodeId || ""}->${feature?.properties?.toNodeId || ""}`)
+        .join(",");
+      return `${camera}::${attackKey}::${previewKey}`;
+    }
+    function getProjectedPath(coords, featureId) {
+      const key = `${projectedPathsCacheKey()}|${featureId}`;
+      if (cachedProjectedPaths.has(key)) {
+        return cachedProjectedPaths.get(key);
+      }
+      const projected = coords
+        .map((coord) => {
+          const point = projectCached(coord);
+          return [point.x, point.y];
+        })
+        .filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y));
+      cachedProjectedPaths.set(key, projected);
+      return projected;
+    }
+    function invalidateAttackCaches() {
+      cachedEffectiveFlow = null;
+      cachedEffectiveFlowKey = "";
+      cachedProjectedPaths.clear();
+      cachedProjectedPathsKey = "";
+      cachedProjectedPoints.clear();
+      cachedProjectedPointsKey = "";
+    }
+
     function computeEffectiveFlowByAttackKey() {
       const nodeState = new Map();
       for (const feature of renderedNodeFeatures) {
@@ -491,7 +622,10 @@
       return `Incoming ${fromId} -> ${toId}`;
     }
     function setAttackFeatures(features) {
-      currentAttackFeatures = collapseOverlappingAttackFeatures(features);
+      const serverFeatures = collapseOverlappingAttackFeatures(features || []);
+      reconcileLocalAttacks(serverFeatures);
+      const localFeatures = (currentAttackFeatures || []).filter((feature) => feature?.properties?.local);
+      currentAttackFeatures = [...serverFeatures, ...localFeatures];
       map.getSource("attack-lines")?.setData({
         type: "FeatureCollection",
         features: currentAttackFeatures,
@@ -706,6 +840,14 @@
         return;
       }
       const sendPerTick = normalizeSendPerTick(sendPerTickInput.value);
+      const isPersonal = isPersonalMovement(targetFeature);
+      let localFeature = null;
+      if (!activeRoute && isPersonal) {
+        localFeature = createLocalAttackFeature(selectedNodeId, targetNodeId, targetFeature, sendPerTick);
+        if (localFeature) {
+          setAttackFeatures([...currentAttackFeatures, localFeature]);
+        }
+      }
       try {
         const response = await fetchJson(ATTACK_URL, {
           method: "POST",
@@ -725,8 +867,9 @@
           setStatus(`Removed ${selectedNodeId} -> ${targetNodeId}.`);
         } else if (response.attack) {
           const nextFeatures = currentAttackFeatures.filter((attackFeature) => !(
-            String(attackFeature?.properties?.fromNodeId || "") === selectedNodeId
-            && String(attackFeature?.properties?.toNodeId || "") === String(targetNodeId)
+            (String(attackFeature?.properties?.fromNodeId || "") === selectedNodeId
+              && String(attackFeature?.properties?.toNodeId || "") === String(targetNodeId))
+            || attackFeature?.properties?.id === localFeature?.properties?.id
           ));
           nextFeatures.push(response.attack);
           setAttackFeatures(nextFeatures);
@@ -738,6 +881,9 @@
         updateNodeInfo(renderedNodeFeatures.find((feature) => String(feature?.properties?.id || "") === inspectedNodeId) || null);
         void refreshGameState();
       } catch (error) {
+        if (localFeature) {
+          removeLocalAttackFeature(selectedNodeId, targetNodeId);
+        }
         if (
           String(targetFeature?.properties?.ownerState || "") === "self"
           && !findAttackFeature(selectedNodeId, targetNodeId)
@@ -1802,7 +1948,7 @@
       connectionCanvasContext.lineDashOffset = dashOffset;
       let drewPoint = false;
       for (let index = 0; index < coords.length; index += 1) {
-        const projected = map.project(coords[index]);
+        const projected = projectCached(coords[index]);
         if (!Number.isFinite(projected.x) || !Number.isFinite(projected.y)) {
           continue;
         }
@@ -1838,9 +1984,9 @@
       if (!point?.segmentStart || !point?.segmentEnd) {
         return;
       }
-      const start = map.project(point.segmentStart);
-      const end = map.project(point.segmentEnd);
-      const center = map.project(point.coordinates);
+      const start = projectCached(point.segmentStart);
+      const end = projectCached(point.segmentEnd);
+      const center = projectCached(point.coordinates);
       const angle = Math.atan2(end.y - start.y, end.x - start.x);
       const zoom = map.getZoom();
       const size = Math.max(8, Math.min(16, 5 + (zoom * 0.55))) * scale;
@@ -1860,9 +2006,30 @@
       connectionCanvasContext.restore();
     }
 
+    function cameraCacheKey() {
+      const transform = map ? map.transform : null;
+      if (!transform) {
+        return "";
+      }
+      return `${transform.zoom.toFixed(3)}|${transform.bearing.toFixed(2)}|${transform.pitch.toFixed(2)}|${transform.center.lng.toFixed(5)}|${transform.center.lat.toFixed(5)}`;
+    }
+    function projectCached(coord) {
+      const camera = cameraCacheKey();
+      if (camera !== cachedProjectedPointsKey) {
+        cachedProjectedPoints.clear();
+        cachedProjectedPointsKey = camera;
+      }
+      const coordKey = `${Number(coord[0]).toFixed(6)},${Number(coord[1]).toFixed(6)}`;
+      if (cachedProjectedPoints.has(coordKey)) {
+        return cachedProjectedPoints.get(coordKey);
+      }
+      const projected = map.project(coord);
+      cachedProjectedPoints.set(coordKey, projected);
+      return projected;
+    }
     function segmentLengthPx(start, end) {
-      const projectedStart = map.project(start);
-      const projectedEnd = map.project(end);
+      const projectedStart = projectCached(start);
+      const projectedEnd = projectCached(end);
       const dx = projectedEnd.x - projectedStart.x;
       const dy = projectedEnd.y - projectedStart.y;
       return Math.sqrt((dx * dx) + (dy * dy));
@@ -1873,8 +2040,8 @@
       }
       let remaining = Math.max(0, distancePx);
       for (let index = 1; index < coords.length; index += 1) {
-        const projectedStart = map.project(coords[index - 1]);
-        const projectedEnd = map.project(coords[index]);
+        const projectedStart = projectCached(coords[index - 1]);
+        const projectedEnd = projectCached(coords[index]);
         const dx = projectedEnd.x - projectedStart.x;
         const dy = projectedEnd.y - projectedStart.y;
         const segmentPx = Math.sqrt((dx * dx) + (dy * dy));
@@ -1951,10 +2118,19 @@
       return totalPx;
     }
 
-    function renderAttackArrows(timestampMs = Date.now()) {
+    function renderAttackArrows(timestampMs = performance.now()) {
+      if (attackArrowAnimationFrame) {
+        window.cancelAnimationFrame(attackArrowAnimationFrame);
+        attackArrowAnimationFrame = 0;
+      }
+      if (timestampMs - lastAttackRenderTime < ATTACK_RENDER_INTERVAL_MS) {
+        attackArrowAnimationFrame = window.requestAnimationFrame(renderAttackArrows);
+        return;
+      }
+      lastAttackRenderTime = timestampMs;
       ensureConnectionCanvasSize();
       connectionCanvasContext.clearRect(0, 0, connectionCanvasEl.clientWidth, connectionCanvasEl.clientHeight);
-      const effectiveFlowByAttackKey = computeEffectiveFlowByAttackKey();
+      const effectiveFlowByAttackKey = getCachedEffectiveFlow();
       const zoomWidth = Math.max(2.6, Math.min(5.0, 1.15 + (map.getZoom() * 0.18)));
       for (const previewFeature of currentPreviewFeatures) {
         const previewCoords = previewFeature?.geometry?.coordinates;
@@ -2207,6 +2383,7 @@
       } else {
         clearConnectableTargets();
       }
+      invalidateAttackCaches();
     }
 
     async function refreshVisibleTiles(force = false) {
@@ -2384,7 +2561,11 @@
           disconnectWebSocket();
         }
       } else if (message.type === "world-update") {
-        void refreshGameState();
+        const now = Date.now();
+        if (now - lastWorldUpdateRefreshAt >= WORLD_UPDATE_THROTTLE_MS) {
+          lastWorldUpdateRefreshAt = now;
+          void refreshGameState();
+        }
       }
     }
 
@@ -2611,7 +2792,10 @@
       gamePollLoop();
     });
 
-    map.on("load", async () => {
+    function initializeMap() {
+      map = new maplibregl.Map({ container: "map", style: "https://tiles.openfreemap.org/styles/liberty", center: [-70.5, 43.8], zoom: 11.8 });
+      map.addControl(new maplibregl.NavigationControl(), "top-right");
+      map.on("load", async () => {
       const style = map.getStyle();
       for (const layer of style.layers || []) {
         const id = String(layer.id || "").toLowerCase();
@@ -2699,7 +2883,42 @@
         attackArrowAnimationFrame = window.requestAnimationFrame(renderAttackArrows);
       }
       if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
-    });
+      });
+    }
+
+    async function waitForServerReady() {
+      const maxAttempts = 120;
+      const delayMs = 500;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        try {
+          const status = await fetchJson(BUILD_STATUS_URL, { cache: "no-store" });
+          if (status.phase === "complete") {
+            const nodeCount = status.node_count || status.total || 0;
+            loadingScreenStatusEl.textContent = `Loaded ${nodeCount.toLocaleString()} nodes. Starting map...`;
+            loadingScreenProgressEl.classList.remove("indeterminate");
+            loadingScreenProgressEl.style.width = "100%";
+            await new Promise((resolve) => window.setTimeout(resolve, 200));
+            loadingScreenEl.classList.add("hidden");
+            return;
+          }
+          loadingScreenStatusEl.textContent = `Preparing nodes... ${status.progress_nodes_current || 0} / ${status.progress_nodes_total || "?"}`;
+        } catch (error) {
+          loadingScreenStatusEl.textContent = `Waiting for server... (${attempt + 1})`;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+      }
+      throw new Error("Server did not become ready in time.");
+    }
+
+    waitForServerReady()
+      .then(() => {
+        initializeMap();
+      })
+      .catch((error) => {
+        loadingScreenStatusEl.textContent = `Failed to start: ${error.message}`;
+        loadingScreenProgressEl.classList.remove("indeterminate");
+        loadingScreenProgressEl.style.width = "0%";
+      });
   </script>
 </body>
 </html>
