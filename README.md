@@ -6,6 +6,7 @@ Persistent multiplayer road-based node strategy game built with Rust and MapLibr
 
 - Runtime server: Rust in `rust_server/`
 - Viewer: `openfreemap_viewer.html`
+- S2/Hilbert node generator: Rust binary in `rust_server/src/bin/generate_nodes.rs`
 - Cache/prepare step: Rust binary in `rust_server/src/bin/prepare_region_cache.rs`
 
 The project runtime is Rust-only.
@@ -24,8 +25,8 @@ The project runtime is Rust-only.
 
 - Backend is written in Rust in `rust_server/`.
 - Data exchange uses JSON.
-- Current live game state and actions are still served through HTTP JSON endpoints.
-- Recommended next networking step is a Rust WebSocket JSON channel for world updates, while keeping request-style endpoints only for auth/bootstrap if needed.
+- HTTP JSON endpoints remain available for auth, bootstrap, and request-style actions.
+- Live world updates are pushed over a WebSocket on `ws://localhost:8003/ws` so connected clients see changes immediately instead of polling.
 
 ## Current Gameplay Flow
 
@@ -38,7 +39,8 @@ The project runtime is Rust-only.
 ## Project Structure
 
 - `openfreemap_viewer.html`: main frontend shell, overlays, canvas connection rendering
-- `rust_server/src/main.rs`: Rust backend, auth, world state, connection rules, JSON APIs
+- `rust_server/src/main.rs`: Rust backend, auth, world state, S2 spatial index, WebSocket broadcaster, JSON APIs
+- `rust_server/src/bin/generate_nodes.rs`: Rust generator that sorts intersections by S2 Hilbert curve
 - `rust_server/src/bin/prepare_region_cache.rs`: Rust cache/prepare step for prepared region data
 - `local_node_store/`: local region data and state boundaries
 - `vendor/`: local frontend dependencies
@@ -62,10 +64,13 @@ Run the app with:
 ./resume_node_map.sh
 ```
 
-This now does 2 Rust-only steps:
+This now does 3 Rust-only steps:
 
+- generate S2/Hilbert-sorted node data
 - refresh cached region status files
 - start the Rust game server
+
+The HTTP server listens on port `8002` and the WebSocket server listens on port `8003`. Set `WS_PORT` to change the WebSocket port.
 
 Open:
 

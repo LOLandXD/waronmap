@@ -158,6 +158,7 @@
     const CONNECTION_PREVIEW_URL = "/api/connection-preview";
     const CONNECTION_RATE_URL = "/api/connection-rate";
     const CONNECTION_REMOVE_URL = "/api/connection-remove";
+    const WS_URL = "ws://localhost:8003/ws";
     const REGISTER_URL = "/api/register";
     const LOGIN_URL = "/api/login";
     const ATTACK_URL = "/api/attack";
@@ -182,8 +183,10 @@
     const MAX_VISIBLE_NODE_TILES = 16;
     const MAX_CONNECTABLE_CANDIDATES = 1500;
     const VISIBLE_TILE_REFRESH_COOLDOWN_MS = 5000;
+    const NODE_TILE_CACHE_TTL_MS = 2200;
     const ZOOM_IN_MESSAGE = "Please zoom in to see nodes.";
     const DEFAULT_SEND_PER_TICK = 1;
+    const HIDE_NODE_INFORMATION_TEST = false;
 
     const topBarEl = document.getElementById("topBar");
     const showTopBarButton = document.getElementById("showTopBarButton");
@@ -235,6 +238,9 @@
     let activeRegion = null;
     let buildPollTimer = null;
     let gamePollTimer = null;
+    let wsConnection = null;
+    let wsConnected = false;
+    let wsReconnectTimer = null;
     let sessionToken = localStorage.getItem(SESSION_KEY) || "";
     let selectedNodeId = null;
     let currentPlayerId = null;
@@ -252,6 +258,7 @@
     let visibleTileRefreshTimer = null;
     let activeVisibleTileAbortController = null;
     let lastVisibleTileRefreshStartedAt = 0;
+    let activeVisibleTileRequestKey = "";
     let connectableRefreshTimer = null;
     let connectableRefreshVersion = 0;
     let connectableNodeIds = new Set();
@@ -268,6 +275,7 @@
     let attackArrowAnimationFrame = 0;
     let hoveredAttackKey = null;
     let hoveredPreviewTargetNodeId = null;
+    const nodeTileResponseCache = new Map();
     const connectionCanvasContext = connectionCanvasEl.getContext("2d");
 
     const map = new maplibregl.Map({ container: "map", style: "https://tiles.openfreemap.org/styles/liberty", center: [-70.5, 43.8], zoom: 11.8 });
@@ -870,14 +878,37 @@
       if (total <= 1) {
         return [0, 0];
       }
-      const ring = Math.floor(index / 6);
-      const stepInRing = index % 6;
-      const pointsInRing = Math.min(total, 6);
+      const ring = Math.floor(index / 8);
+      const stepInRing = index % 8;
+      const pointsInRing = Math.min(total, 8);
       const angle = (Math.PI * 2 * stepInRing) / pointsInRing;
-      const meters = 7 + (ring * 5);
+      const meters = 18 + (ring * 12);
       const latOffset = (meters / 111_320) * Math.sin(angle);
       const lonOffset = (meters / (111_320 * Math.cos((lat * Math.PI) / 180) || 1)) * Math.cos(angle);
       return [lonOffset, latOffset];
+    }
+    function nodeTileCacheKey(z, x, y) {
+      return `${currentPlayerId || "anon"}:${z}:${x}:${y}`;
+    }
+    function getCachedNodeTilePayload(z, x, y) {
+      const cached = nodeTileResponseCache.get(nodeTileCacheKey(z, x, y));
+      if (!cached) {
+        return null;
+      }
+      if (Date.now() - cached.cachedAt > NODE_TILE_CACHE_TTL_MS) {
+        nodeTileResponseCache.delete(nodeTileCacheKey(z, x, y));
+        return null;
+      }
+      return cached.payload;
+    }
+    function setCachedNodeTilePayload(z, x, y, payload) {
+      nodeTileResponseCache.set(nodeTileCacheKey(z, x, y), {
+        payload,
+        cachedAt: Date.now(),
+      });
+    }
+    function clearNodeTileResponseCache() {
+      nodeTileResponseCache.clear();
     }
     function spreadOverlappingNodeFeatures(features) {
       const grouped = new Map();
@@ -988,6 +1019,7 @@
       const controller = new AbortController();
       const externalSignal = options.signal || null;
       let detachExternalAbort = null;
+      let timedOut = false;
       if (externalSignal) {
         if (externalSignal.aborted) {
           controller.abort();
@@ -997,7 +1029,10 @@
           detachExternalAbort = () => externalSignal.removeEventListener("abort", forwardAbort);
         }
       }
-      const timeoutId = window.setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+      const timeoutId = window.setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, FETCH_TIMEOUT_MS);
       try {
         const requestOptions = { ...options };
         delete requestOptions.signal;
@@ -1014,9 +1049,15 @@
         return body;
       } catch (error) {
         if (error.name === "AbortError") {
-          error.message = `Request timed out after ${Math.round(FETCH_TIMEOUT_MS / 1000)}s`;
+          if (timedOut) {
+            error.message = `Request timed out after ${Math.round(FETCH_TIMEOUT_MS / 1000)}s`;
+          } else if (externalSignal?.aborted) {
+            error.message = "Request replaced by a newer refresh.";
+            error.silenced = true;
+            error.retryable = false;
+          }
         }
-        if (error.name === "AbortError" || error.name === "TypeError" || error.retryable) {
+        if (!error.silenced && (error.name === "AbortError" || error.name === "TypeError" || error.retryable)) {
           error.retryable = true;
           error.retryAfterMs = NETWORK_RETRY_MS;
         }
@@ -1282,6 +1323,10 @@
     }
 
     function updateNodeInfo(feature = null) {
+      if (HIDE_NODE_INFORMATION_TEST) {
+        nodeInfoEl.classList.add("hidden");
+        return;
+      }
       if (!feature) {
         nodeInfoEl.classList.add("hidden");
         nodeInfoTitleEl.textContent = "Node Info";
@@ -1308,8 +1353,11 @@
       nodeInfoArmyEl.textContent = Number(feature.properties?.army || 0).toLocaleString();
       nodeInfoDeltaEl.textContent = formatSignedTickRate(perTick.net);
       nodeInfoPositionEl.textContent = coords ? `${coords[1].toFixed(4)}, ${coords[0].toFixed(4)}` : "-";
+      const isSelectedNode = String(feature.properties?.id || "") === String(selectedNodeId || "");
       nodeInfoStatusEl.textContent = feature.properties?.ownerState === "self"
-        ? `+${perTick.passive}/tick, -${perTick.outgoing.toLocaleString()}/tick out, +${perTick.incomingTransfer.toLocaleString()}/tick in, -${perTick.incomingAttack.toLocaleString()}/tick hit. Click an adjacent node.`
+        ? (connectPreviewMode && isSelectedNode
+          ? "Please click another node to link."
+          : `+${perTick.passive}/tick, -${perTick.outgoing.toLocaleString()}/tick out, +${perTick.incomingTransfer.toLocaleString()}/tick in, -${perTick.incomingAttack.toLocaleString()}/tick hit. Click an adjacent node.`)
         : `${perTick.passive ? `+${perTick.passive}` : "0"}/tick base.`;
       updateRouteControls(feature);
       renderSelectedNodeTargets();
@@ -1569,6 +1617,9 @@
       }
       connectPreviewMode = true;
       scheduleConnectableTargetsRefresh(0);
+      if (String(inspectedNodeId || "") === String(selectedNodeId || "")) {
+        updateNodeInfo(selectedNodeFeature);
+      }
       updateRouteControls(renderedNodeFeatures.find((feature) => String(feature.properties?.id || "") === inspectedNodeId) || selectedNodeFeature);
       if (statusMessage) {
         setStatus(statusMessage);
@@ -1816,6 +1867,41 @@
       const dy = projectedEnd.y - projectedStart.y;
       return Math.sqrt((dx * dx) + (dy * dy));
     }
+    function pointAlongLinePx(coords, distancePx) {
+      if (!Array.isArray(coords) || coords.length < 2) {
+        return null;
+      }
+      let remaining = Math.max(0, distancePx);
+      for (let index = 1; index < coords.length; index += 1) {
+        const projectedStart = map.project(coords[index - 1]);
+        const projectedEnd = map.project(coords[index]);
+        const dx = projectedEnd.x - projectedStart.x;
+        const dy = projectedEnd.y - projectedStart.y;
+        const segmentPx = Math.sqrt((dx * dx) + (dy * dy));
+        if (segmentPx <= 0) {
+          continue;
+        }
+        if (remaining <= segmentPx) {
+          const ratio = remaining / segmentPx;
+          const x = projectedStart.x + (dx * ratio);
+          const y = projectedStart.y + (dy * ratio);
+          const lngLat = map.unproject([x, y]);
+          return {
+            coordinates: [lngLat.lng, lngLat.lat],
+            segmentStart: coords[index - 1],
+            segmentEnd: coords[index],
+          };
+        }
+        remaining -= segmentPx;
+      }
+      const last = coords[coords.length - 1];
+      const beforeLast = coords[coords.length - 2];
+      return {
+        coordinates: last,
+        segmentStart: beforeLast,
+        segmentEnd: last,
+      };
+    }
     function visibleNodeRadiusPx() {
       const zoom = map.getZoom();
       if (zoom <= NODE_MIN_ZOOM) {
@@ -1831,20 +1917,20 @@
       }
       return 17.5;
     }
-    function trimmedLineCoords(coords, startKm, endKm) {
-      if (!Array.isArray(coords) || coords.length < 2 || endKm <= startKm) {
+    function trimmedLineCoordsByPixels(coords, startPx, endPx) {
+      if (!Array.isArray(coords) || coords.length < 2 || endPx <= startPx) {
         return [];
       }
-      const startPoint = pointAlongLine(coords, startKm);
-      const endPoint = pointAlongLine(coords, endKm);
+      const startPoint = pointAlongLinePx(coords, startPx);
+      const endPoint = pointAlongLinePx(coords, endPx);
       if (!startPoint?.coordinates || !endPoint?.coordinates) {
         return [];
       }
       const out = [startPoint.coordinates];
-      let traveledKm = 0;
+      let traveledPx = 0;
       for (let index = 1; index < coords.length; index += 1) {
-        traveledKm += pointDistanceKm(coords[index - 1], coords[index]);
-        if (traveledKm > startKm && traveledKm < endKm) {
+        traveledPx += segmentLengthPx(coords[index - 1], coords[index]);
+        if (traveledPx > startPx && traveledPx < endPx) {
           out.push(coords[index]);
         }
       }
@@ -1854,18 +1940,15 @@
       }
       return out.length >= 2 ? out : [startPoint.coordinates, endPoint.coordinates];
     }
-    function routeInteriorPaddingKm(coords, totalKm) {
-      let kmPerPx = 0;
+    function routeInteriorPaddingPx() {
+      return Math.max(visibleNodeRadiusPx() - 2.4, 6.5);
+    }
+    function totalLineLengthPx(coords) {
+      let totalPx = 0;
       for (let index = 1; index < coords.length; index += 1) {
-        const segmentKm = pointDistanceKm(coords[index - 1], coords[index]);
-        const segmentPx = segmentLengthPx(coords[index - 1], coords[index]);
-        if (segmentKm > 0 && segmentPx > 0) {
-          kmPerPx = segmentKm / segmentPx;
-          break;
-        }
+        totalPx += segmentLengthPx(coords[index - 1], coords[index]);
       }
-      const pixelPaddingKm = kmPerPx > 0 ? kmPerPx * Math.max(visibleNodeRadiusPx() - 1.2, 7) : 0;
-      return Math.min(Math.max(totalKm * 0.08, pixelPaddingKm, 0.02), Math.max((totalKm / 2) - 0.02, 0));
+      return totalPx;
     }
 
     function renderAttackArrows(timestampMs = Date.now()) {
@@ -1878,12 +1961,9 @@
         if (!Array.isArray(previewCoords) || previewCoords.length < 2) {
           continue;
         }
-        let previewTotalKm = 0;
-        for (let index = 1; index < previewCoords.length; index += 1) {
-          previewTotalKm += pointDistanceKm(previewCoords[index - 1], previewCoords[index]);
-        }
-        const previewPaddingKm = routeInteriorPaddingKm(previewCoords, previewTotalKm);
-        const trimmedPreviewCoords = trimmedLineCoords(previewCoords, previewPaddingKm, Math.max(previewPaddingKm, previewTotalKm - previewPaddingKm));
+        const previewTotalPx = totalLineLengthPx(previewCoords);
+        const previewPaddingPx = Math.min(routeInteriorPaddingPx(), Math.max((previewTotalPx / 2) - 1, 0));
+        const trimmedPreviewCoords = trimmedLineCoordsByPixels(previewCoords, previewPaddingPx, Math.max(previewPaddingPx, previewTotalPx - previewPaddingPx));
         const previewColor = hoveredPreviewTargetNodeId && previewTargetNodeId === hoveredPreviewTargetNodeId
           ? "rgba(250, 204, 21, 0.98)"
           : "rgba(148, 163, 184, 0.95)";
@@ -1911,8 +1991,9 @@
         const color = connectionLineColor(attackFeature, isHoveredAttack || !dimNonHoveredLines ? 1 : 0.3);
         const dashSpeedPerSecond = DASH_CYCLE_LEN * Math.max(0, effectiveSendPerTick);
         const dashOffset = marchingDashOffset(dashSpeedPerSecond, timestampMs);
-        const edgePaddingKm = routeInteriorPaddingKm(coords, totalKm);
-        const trimmedCoords = trimmedLineCoords(coords, edgePaddingKm, Math.max(edgePaddingKm, totalKm - edgePaddingKm));
+        const totalPx = totalLineLengthPx(coords);
+        const edgePaddingPx = Math.min(routeInteriorPaddingPx(), Math.max((totalPx / 2) - 1, 0));
+        const trimmedCoords = trimmedLineCoordsByPixels(coords, edgePaddingPx, Math.max(edgePaddingPx, totalPx - edgePaddingPx));
         if (isHoveredAttack) {
           drawMovingTransportLine(trimmedCoords, "rgba(255, 255, 255, 0.98)", zoomWidth + 5.4, dashOffset);
           drawMovingTransportLine(trimmedCoords, "rgba(250, 204, 21, 0.98)", zoomWidth + 3.4, dashOffset);
@@ -1926,6 +2007,7 @@
       const current = Number(buildStatus.current || 0);
       const total = Number(buildStatus.total || 0);
       const percent = total > 0 ? Math.round((current / total) * 100) : 0;
+      const isComplete = String(buildStatus.phase || "") === "complete" || (total > 0 && current >= total);
       const label = `${current.toLocaleString()} / ${total.toLocaleString()}`;
       loadingMessageEl.textContent = buildStatus.message || "Building nodes...";
       loadingProgressTextEl.textContent = label;
@@ -1936,6 +2018,11 @@
       tileProgressFillEl.classList.remove("indeterminate");
       tileProgressFillEl.style.width = `${percent}%`;
       previewNodeCountEl.textContent = Number(buildStatus.node_count || 0).toLocaleString();
+      map.getSource("generation-target")?.setData(
+        isComplete
+          ? emptyFeatureCollection()
+          : { type: "FeatureCollection", features: currentGenerationFeatures }
+      );
       try {
         localStorage.setItem(LAST_BUILD_STATUS_KEY, JSON.stringify(buildStatus));
       } catch {}
@@ -2032,6 +2119,9 @@
     }
 
     async function handleNodeClick(event) {
+      if (HIDE_NODE_INFORMATION_TEST) {
+        return;
+      }
       const feature = event.features?.[0];
       if (!feature) return;
       const props = feature.properties || {};
@@ -2106,8 +2196,7 @@
       if (requestVersion !== visibleTileRefreshVersion) {
         return;
       }
-      const orderedFeatures = [...features].sort((left, right) => String(left?.properties?.id || "").localeCompare(String(right?.properties?.id || "")));
-      const displayFeatures = spreadOverlappingNodeFeatures(orderedFeatures);
+      const displayFeatures = spreadOverlappingNodeFeatures(features);
       renderedNodeFeatures = displayFeatures;
       syncInspectedNodeFromRenderedFeatures(displayFeatures);
       syncSelectionFromRenderedFeatures(displayFeatures);
@@ -2120,10 +2209,11 @@
       }
     }
 
-    async function refreshVisibleTiles() {
+    async function refreshVisibleTiles(force = false) {
       if (map.getZoom() < NODE_MIN_ZOOM) {
         activeVisibleTileAbortController?.abort();
         activeVisibleTileAbortController = null;
+        activeVisibleTileRequestKey = "";
         renderedNodeFeatures = [];
         inspectedNodeId = null;
         updateNodeInfo(null);
@@ -2136,11 +2226,16 @@
         return;
       }
       const requests = currentTileRequests();
+      const requestKey = `${currentPlayerId || "anon"}|${requests.map(({ z, x, y }) => `${z}/${x}/${y}`).join(",")}`;
+      if (!force && activeVisibleTileRequestKey === requestKey && activeVisibleTileAbortController) {
+        return;
+      }
       lastVisibleTileRefreshStartedAt = Date.now();
       const requestVersion = ++visibleTileRefreshVersion;
       activeVisibleTileAbortController?.abort();
       const requestAbortController = new AbortController();
       activeVisibleTileAbortController = requestAbortController;
+      activeVisibleTileRequestKey = requestKey;
       const suffix = sessionToken ? `&token=${encodeURIComponent(sessionToken)}` : "";
       const features = [];
       const seen = new Set();
@@ -2161,6 +2256,16 @@
       };
       const results = await Promise.allSettled(
         requests.map(async ({ z, x, y }) => {
+          if (!force) {
+            const cachedPayload = getCachedNodeTilePayload(z, x, y);
+            if (cachedPayload) {
+              if (requestVersion !== visibleTileRefreshVersion || requestAbortController.signal.aborted) {
+                return null;
+              }
+              mergePayload(cachedPayload);
+              return cachedPayload;
+            }
+          }
           const payload = await fetchJson(`${NODE_TILE_URL}?z=${z}&x=${x}&y=${y}${suffix}`, {
             cache: "no-store",
             signal: requestAbortController.signal,
@@ -2168,12 +2273,19 @@
           if (requestVersion !== visibleTileRefreshVersion || requestAbortController.signal.aborted) {
             return null;
           }
+          setCachedNodeTilePayload(z, x, y, payload);
           mergePayload(payload);
           return payload;
         })
       );
       if (requestVersion !== visibleTileRefreshVersion) {
         return;
+      }
+      if (activeVisibleTileAbortController === requestAbortController) {
+        activeVisibleTileAbortController = null;
+      }
+      if (activeVisibleTileRequestKey === requestKey) {
+        activeVisibleTileRequestKey = "";
       }
       const payloads = results
         .filter((result) => result.status === "fulfilled")
@@ -2193,7 +2305,7 @@
       if (!force && Date.now() - lastVisibleTileRefreshStartedAt < VISIBLE_TILE_REFRESH_COOLDOWN_MS) {
         return;
       }
-      await refreshVisibleTiles();
+      await refreshVisibleTiles(force);
     }
 
     function scheduleVisibleTileRefresh(delayMs = 0, force = false) {
@@ -2202,8 +2314,78 @@
       }
       visibleTileRefreshTimer = window.setTimeout(() => {
         visibleTileRefreshTimer = null;
-        maybeRefreshVisibleTiles(force).catch((error) => setStatus(`Tile refresh failed: ${error.message}`));
+        maybeRefreshVisibleTiles(force).catch((error) => {
+          if (error?.silenced) {
+            return;
+          }
+          setStatus(`Tile refresh failed: ${error.message}`);
+        });
       }, delayMs);
+    }
+
+    function connectWebSocket() {
+      if (!sessionToken || wsConnection) {
+        return;
+      }
+      try {
+        wsConnection = new WebSocket(WS_URL);
+        wsConnection.onopen = () => {
+          wsConnection.send(JSON.stringify({ type: "auth", token: sessionToken }));
+        };
+        wsConnection.onmessage = (event) => {
+          try {
+            const message = JSON.parse(event.data);
+            handleWsMessage(message);
+          } catch (error) {
+            console.warn("Failed to parse WebSocket message:", event.data, error);
+          }
+        };
+        wsConnection.onclose = () => {
+          wsConnected = false;
+          wsConnection = null;
+          scheduleWsReconnect();
+        };
+        wsConnection.onerror = (error) => {
+          console.warn("WebSocket error:", error);
+        };
+      } catch (error) {
+        console.warn("Failed to open WebSocket:", error);
+      }
+    }
+
+    function disconnectWebSocket() {
+      if (wsReconnectTimer) {
+        window.clearTimeout(wsReconnectTimer);
+        wsReconnectTimer = null;
+      }
+      if (wsConnection) {
+        const ws = wsConnection;
+        wsConnection = null;
+        wsConnected = false;
+        ws.onclose = null;
+        ws.close();
+      }
+    }
+
+    function scheduleWsReconnect() {
+      if (wsReconnectTimer || !sessionToken) {
+        return;
+      }
+      wsReconnectTimer = window.setTimeout(() => {
+        wsReconnectTimer = null;
+        connectWebSocket();
+      }, GAME_POLL_MS);
+    }
+
+    function handleWsMessage(message) {
+      if (message.type === "authResult") {
+        wsConnected = message.success === true;
+        if (!wsConnected) {
+          disconnectWebSocket();
+        }
+      } else if (message.type === "world-update") {
+        void refreshGameState();
+      }
     }
 
     async function refreshGameState() {
@@ -2234,7 +2416,6 @@
         } else {
           panelAutoHiddenForSession = false;
         }
-        scheduleVisibleTileRefresh(state.player ? 0 : 200);
         updateNodeInfo(renderedNodeFeatures.find((feature) => String(feature.properties?.id || "") === inspectedNodeId) || null);
         updateRouteControls(renderedNodeFeatures.find((feature) => String(feature.properties?.id || "") === inspectedNodeId) || null);
         renderSelectedNodeTargets();
@@ -2244,7 +2425,9 @@
           throw error;
         }
         sessionToken = "";
+        disconnectWebSocket();
         currentPlayerId = null;
+        clearNodeTileResponseCache();
         autoFocusedPlayerId = null;
         lastOwnedFeatures = [];
         selectedNodeId = null;
@@ -2275,8 +2458,10 @@
 
     async function gamePollLoop() {
       try {
-        await refreshGameState();
-        nextGamePollDelayMs = GAME_POLL_MS;
+        if (!wsConnected) {
+          await refreshGameState();
+        }
+        nextGamePollDelayMs = wsConnected ? 30_000 : GAME_POLL_MS;
       } catch (error) {
         nextGamePollDelayMs = error.retryable ? (error.retryAfterMs || NETWORK_RETRY_MS) : GAME_POLL_MS;
         setStatus(`Game polling failed: ${error.message}. Retrying in ${formatRetryDelay(nextGamePollDelayMs)}.`);
@@ -2296,6 +2481,7 @@
         authSummaryEl.textContent = `${actionLabel} in progress...`;
         const result = await fetchJson(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: usernameInput.value.trim(), password: passwordInput.value }) });
         sessionToken = result.token;
+        clearNodeTileResponseCache();
         autoFocusedPlayerId = null;
         panelAutoHiddenForSession = false;
         localStorage.setItem(SESSION_KEY, sessionToken);
@@ -2304,6 +2490,7 @@
         hideMainPanel(true);
         panelAutoHiddenForSession = true;
         setStatus("Logged in. Loading your nodes...");
+        connectWebSocket();
         await refreshGameState();
         scheduleVisibleTileRefresh(0, true);
       } catch (error) {
@@ -2375,6 +2562,7 @@
       setStatus("Centered on your green nodes.");
     });
     logoutButton.addEventListener("click", () => {
+      disconnectWebSocket();
       sessionToken = "";
       currentPlayerId = null;
       autoFocusedPlayerId = null;
@@ -2452,7 +2640,7 @@
       map.addLayer({ id: "game-node-circles", type: "circle", source: "game-nodes", minzoom: NODE_MIN_ZOOM, layout: { "circle-sort-key": ["get", "army"] }, paint: { "circle-color": ["case", ["==", ["get", "ownerState"], "self"], "#22c55e", ["==", ["get", "ownerState"], "enemy"], "#8b5cf6", "#e2e8f0"], "circle-radius": ["interpolate", ["linear"], ["zoom"], NODE_MIN_ZOOM, 10.5, 13, 13.5, 16, 17.5], "circle-stroke-color": "#0f172a", "circle-stroke-width": 1.8, "circle-opacity": 0.96 } });
       map.addLayer({ id: "selected-node-ring", type: "circle", source: "selected-node", minzoom: NODE_MIN_ZOOM, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], NODE_MIN_ZOOM, 16, 13, 20, 16, 25], "circle-color": "rgba(0,0,0,0)", "circle-stroke-color": "#facc15", "circle-stroke-width": 3.2, "circle-opacity": 1 } });
       map.addLayer({ id: "hover-node-ring", type: "circle", source: "hover-node", minzoom: NODE_MIN_ZOOM, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], NODE_MIN_ZOOM, 15.5, 13, 19.5, 16, 24], "circle-color": "rgba(250, 204, 21, 0.18)", "circle-stroke-color": "#facc15", "circle-stroke-width": 4.2, "circle-opacity": 1 } });
-      map.addLayer({ id: "game-node-labels", type: "symbol", source: "game-nodes", minzoom: 12, layout: { "text-field": ["get", "armyLabel"], "text-font": ["Noto Sans Bold"], "text-size": ["interpolate", ["linear"], ["zoom"], 12, 9.5, 13, 11, 16, 13], "text-allow-overlap": true, "text-ignore-placement": true, "symbol-sort-key": ["get", "army"] }, paint: { "text-color": ["case", ["==", ["get", "ownerState"], "neutral"], "#111111", "#f8fafc"], "text-halo-color": ["case", ["==", ["get", "ownerState"], "neutral"], "rgba(255,255,255,0.55)", "rgba(15,23,42,0.65)"], "text-halo-width": 0.6 } });
+      map.addLayer({ id: "game-node-labels", type: "symbol", source: "game-nodes", minzoom: 12, layout: { "visibility": HIDE_NODE_INFORMATION_TEST ? "none" : "visible", "text-field": ["get", "armyLabel"], "text-font": ["Noto Sans Bold"], "text-size": ["interpolate", ["linear"], ["zoom"], 12, 9.5, 13, 11, 16, 13], "text-allow-overlap": true, "text-ignore-placement": true, "symbol-sort-key": ["get", "army"] }, paint: { "text-color": ["case", ["==", ["get", "ownerState"], "neutral"], "#111111", "#f8fafc"], "text-halo-color": ["case", ["==", ["get", "ownerState"], "neutral"], "rgba(255,255,255,0.55)", "rgba(15,23,42,0.65)"], "text-halo-width": 0.6 } });
 
       map.on("click", "connectable-node-rings", handleNodeClick);
       map.on("click", "game-node-circles", handleNodeClick);
@@ -2480,6 +2668,9 @@
 
       installButtonPressEffects();
       loadLoginFormState();
+      if (HIDE_NODE_INFORMATION_TEST) {
+        nodeInfoEl.classList.add("hidden");
+      }
       setSendPerTickValue(DEFAULT_SEND_PER_TICK);
       loadPanelState();
       loadTopBarState();
@@ -2501,6 +2692,7 @@
         nextGamePollDelayMs = error.retryable ? (error.retryAfterMs || NETWORK_RETRY_MS) : GAME_POLL_MS;
         setStatus(`Game polling failed: ${error.message}. Retrying in ${formatRetryDelay(nextGamePollDelayMs)}.`);
       }
+      connectWebSocket();
       buildPollLoop();
       gamePollLoop();
       if (!attackArrowAnimationFrame) {

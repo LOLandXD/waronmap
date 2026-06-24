@@ -53,30 +53,48 @@ fn run() -> Result<(), String> {
         .unwrap_or_else(|| count_csv_rows(&intersections_csv_path).unwrap_or(0));
     let cached_tiles = count_cache_files(&cache_dir);
     let query_tiles = query_tile_boxes(&region, existing_metadata.get("batch_step_deg").and_then(Value::as_f64).unwrap_or(0.2));
-    let edge_count = read_json_value_optional(&build_status_path)
-        .and_then(|value| value.get("edge_count").and_then(Value::as_u64).map(|value| value as usize))
+    let existing_build_status = read_json_value_optional(&build_status_path).unwrap_or_else(|| json!({}));
+    let edge_count = existing_build_status
+        .get("edge_count")
+        .and_then(Value::as_u64)
         .unwrap_or(0);
+    let indexing_method = existing_build_status
+        .get("indexing_method")
+        .cloned()
+        .or_else(|| existing_metadata.get("indexing_method").cloned())
+        .unwrap_or_else(|| json!("web_mercator_tile_grid"));
+    let s2_index_level = existing_build_status
+        .get("s2_index_level")
+        .cloned()
+        .or_else(|| existing_metadata.get("s2_index_level").cloned());
 
     let metadata = merged_metadata(&existing_metadata, &region, total_points, query_tiles.len());
     write_json_pretty(&metadata_path, &metadata)?;
-    write_json_pretty(
-        &build_status_path,
-        &json!({
-            "phase": "complete",
-            "region_id": metadata.get("region_id").cloned().unwrap_or_else(|| json!("unknown")),
-            "region_name": metadata.get("region_name").cloned().unwrap_or_else(|| json!("Unknown Region")),
-            "states": metadata.get("states").cloned().unwrap_or_else(|| json!([])),
-            "current": total_points,
-            "total": total_points,
-            "cached_tiles": cached_tiles,
-            "node_count": total_points,
-            "edge_count": edge_count,
-            "progress_kind": "nodes",
-            "progress_nodes_current": total_points,
-            "progress_nodes_total": total_points,
-            "message": format!("Prepared node dataset cached with {} nodes.", total_points)
-        }),
-    )?;
+    let mut build_status = json!({
+        "phase": "complete",
+        "region_id": metadata.get("region_id").cloned().unwrap_or_else(|| json!("unknown")),
+        "region_name": metadata.get("region_name").cloned().unwrap_or_else(|| json!("Unknown Region")),
+        "states": metadata.get("states").cloned().unwrap_or_else(|| json!([])),
+        "current": total_points,
+        "total": total_points,
+        "cached_tiles": cached_tiles,
+        "node_count": total_points,
+        "edge_count": edge_count,
+        "progress_kind": "nodes",
+        "progress_nodes_current": total_points,
+        "progress_nodes_total": total_points,
+        "message": format!("Prepared node dataset cached with {} nodes.", total_points)
+    });
+    if let Value::String(method) = &indexing_method {
+        build_status["indexing_method"] = indexing_method.clone();
+        if method == "s2_hilbert" {
+            build_status["message"] = json!(format!("Prepared S2/Hilbert-sorted node dataset with {} nodes.", total_points));
+        }
+    }
+    if let Some(level) = s2_index_level {
+        build_status["s2_index_level"] = level;
+    }
+    write_json_pretty(&build_status_path, &build_status)?;
     write_json_compact(
         &query_tiles_status_path,
         &json!({

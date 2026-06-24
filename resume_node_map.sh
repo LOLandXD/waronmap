@@ -10,6 +10,8 @@ SERVER_MANIFEST="$ROOT_DIR/rust_server/Cargo.toml"
 SERVER_MAIN="$ROOT_DIR/rust_server/src/main.rs"
 SERVER_BIN="$ROOT_DIR/rust_server/target/release/node_game_server"
 PREPARE_BIN="$ROOT_DIR/rust_server/target/release/prepare_region_cache"
+GENERATE_BIN="$ROOT_DIR/rust_server/target/release/generate_nodes"
+GENERATE_MAIN="$ROOT_DIR/rust_server/src/bin/generate_nodes.rs"
 PREPARE_MAIN="$ROOT_DIR/rust_server/src/bin/prepare_region_cache.rs"
 
 mkdir -p "$RUNTIME_DIR"
@@ -31,7 +33,7 @@ release_conflicting_port() {
 }
 
 build_binaries() {
-  if [[ ! -x "$SERVER_BIN" || ! -x "$PREPARE_BIN" || "$SERVER_MAIN" -nt "$SERVER_BIN" || "$PREPARE_MAIN" -nt "$PREPARE_BIN" || "$SERVER_MANIFEST" -nt "$SERVER_BIN" || "$SERVER_MANIFEST" -nt "$PREPARE_BIN" ]]; then
+  if [[ ! -x "$SERVER_BIN" || ! -x "$PREPARE_BIN" || ! -x "$GENERATE_BIN" || "$SERVER_MAIN" -nt "$SERVER_BIN" || "$PREPARE_MAIN" -nt "$PREPARE_BIN" || "$GENERATE_MAIN" -nt "$GENERATE_BIN" || "$SERVER_MANIFEST" -nt "$SERVER_BIN" || "$SERVER_MANIFEST" -nt "$PREPARE_BIN" || "$SERVER_MANIFEST" -nt "$GENERATE_BIN" ]]; then
     cargo build --release --manifest-path "$SERVER_MANIFEST"
   fi
 }
@@ -52,12 +54,19 @@ start_server() {
   fi
 }
 
+generate_nodes() {
+  build_binaries
+  "$GENERATE_BIN" "$ROOT_DIR" >"$BUILDER_LOG" 2>&1
+  echo "Generated S2/Hilbert-sorted nodes"
+}
+
 prepare_region_cache() {
   build_binaries
-  "$PREPARE_BIN" "$ROOT_DIR" >"$BUILDER_LOG" 2>&1
+  "$PREPARE_BIN" "$ROOT_DIR" >>"$BUILDER_LOG" 2>&1
   echo "Prepared cached region files"
 }
 
+generate_nodes
 prepare_region_cache
 start_server
 

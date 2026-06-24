@@ -1,5 +1,9 @@
+use futures_util::{SinkExt, StreamExt};
 use geo::{Coord as GeoCoord, LineString, Simplify};
 use rand::random;
+use s2::cellid::CellID;
+use s2::latlng::LatLng;
+use s2::rect::Rect as S2Rect;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -55,6 +59,7 @@ struct RepoNode {
     lat: f64,
     lon: f64,
     degree: i64,
+    s2_cell_id: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -83,6 +88,9 @@ struct NodeRepo {
     immediate_neighbor_cache: HashMap<String, Vec<String>>,
     route_cache: HashMap<String, Vec<[f64; 2]>>,
     tile_node_id_cache: HashMap<String, Vec<String>>,
+    s2_sorted_nodes: Vec<(u64, String)>,
+    s2_cell_ranges: HashMap<u64, (usize, usize)>,
+    s2_index_level: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -208,10 +216,11 @@ struct App {
     region_manifest_path: PathBuf,
     state_boundaries_path: PathBuf,
     inner: Mutex<AppData>,
+    ws_update_sender: crossbeam_channel::Sender<String>,
 }
 
 impl App {
-    fn new(root: PathBuf) -> Result<Self, String> {
+    fn new(root: PathBuf, ws_update_sender: crossbeam_channel::Sender<String>) -> Result<Self, String> {
         let data_dir = root.join("game_data");
         fs::create_dir_all(&data_dir).map_err(|err| err.to_string())?;
         let state_path = data_dir.join("state.json");
@@ -242,6 +251,7 @@ impl App {
                 node_repo: NodeRepo::default(),
                 boundary_repo: BoundaryRepo::default(),
             }),
+            ws_update_sender,
         })
     }
 
@@ -370,6 +380,7 @@ impl App {
             if !self.point_inside_active_region(data, lat, lon) {
                 continue;
             }
+            let cell_id = CellID::from(LatLng::from_degrees(lat, lon));
             data.node_repo.nodes_by_id.insert(
                 node_id.to_string(),
                 RepoNode {
@@ -377,6 +388,7 @@ impl App {
                     lat,
                     lon,
                     degree,
+                    s2_cell_id: cell_id.0,
                 },
             );
             data.node_repo
@@ -384,6 +396,27 @@ impl App {
                 .insert(node_id.to_string(), Coord { lat, lon });
         }
         Ok(())
+    }
+
+    fn build_s2_index(&self, data: &mut AppData) {
+        let level = data.node_repo.s2_index_level.max(1).min(30);
+        let mut sorted: Vec<(u64, String)> = data
+            .node_repo
+            .nodes_by_id
+            .values()
+            .map(|node| (node.s2_cell_id, node.id.clone()))
+            .collect();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+        let mut ranges: HashMap<u64, (usize, usize)> = HashMap::new();
+        for (index, (leaf_cell_raw, _)) in sorted.iter().enumerate() {
+            let parent = CellID(*leaf_cell_raw).parent(level);
+            let entry = ranges.entry(parent.0).or_insert((index, index));
+            entry.1 = index;
+        }
+
+        data.node_repo.s2_sorted_nodes = sorted;
+        data.node_repo.s2_cell_ranges = ranges;
     }
 
     fn ensure_node_repo_fresh(&self, data: &mut AppData, force: bool) -> Result<(), String> {
@@ -413,6 +446,9 @@ impl App {
         data.node_repo.immediate_neighbor_cache.clear();
         data.node_repo.route_cache.clear();
         data.node_repo.tile_node_id_cache.clear();
+        data.node_repo.s2_sorted_nodes.clear();
+        data.node_repo.s2_cell_ranges.clear();
+        data.node_repo.s2_index_level = 12;
 
         if self.preview_path.exists() {
             let preview = read_json_file::<GenericCollection>(&self.preview_path)
@@ -436,6 +472,7 @@ impl App {
                     .and_then(Value::as_f64)
                     .unwrap_or(0.0)
                     .round() as i64;
+                let cell_id = CellID::from(LatLng::from_degrees(lat, lon));
                 data.node_repo.nodes_by_id.insert(
                     node_id.clone(),
                     RepoNode {
@@ -443,6 +480,7 @@ impl App {
                         lat,
                         lon,
                         degree,
+                        s2_cell_id: cell_id.0,
                     },
                 );
                 data.node_repo.coords_by_id.insert(node_id, Coord { lat, lon });
@@ -452,6 +490,8 @@ impl App {
         } else {
             return Err("No prepared node source found.".to_string());
         }
+
+        self.build_s2_index(data);
 
         let mut cache_files = fs::read_dir(&self.cache_dir)
             .ok()
@@ -521,7 +561,7 @@ impl App {
                 }
             }
         }
-
+        
         let mut component_id = 0_i64;
         let all_graph_node_ids = data
             .node_repo
@@ -614,6 +654,19 @@ impl App {
             self.save_state_locked(&mut data.state)?;
         }
         Ok(modified)
+    }
+
+    fn warm_node_repo(&self) -> Result<(), String> {
+        let mut data = self.inner.lock().unwrap();
+        println!("Warming node repository...");
+        self.ensure_node_repo_fresh(&mut data, true)?;
+        self.sync_world_nodes_locked(&mut data)?;
+        println!(
+            "Node repository ready: {} nodes, {} edges.",
+            data.node_repo.nodes_by_id.len(),
+            data.node_repo.adjacency.values().map(|edges| edges.len()).sum::<usize>()
+        );
+        Ok(())
     }
 
     fn sorted_neutral_nodes_locked(&self, data: &mut AppData) -> Result<Vec<RepoNode>, String> {
@@ -1249,16 +1302,27 @@ impl App {
             return Ok(ids.clone());
         }
         let bounds = tile_bounds(zoom, x, y);
+        let level = data.node_repo.s2_index_level;
+        let cover = s2_cover_for_bounds(&bounds, level);
         let mut node_ids = Vec::new();
-        for node in data.node_repo.nodes_by_id.values() {
-            if node.lon < bounds.west
-                || node.lon >= bounds.east
-                || node.lat < bounds.south
-                || node.lat > bounds.north
-            {
-                continue;
+        for cell in cover {
+            if let Some(&(start, end)) = data.node_repo.s2_cell_ranges.get(&cell.0) {
+                for index in start..=end {
+                    if let Some((_, node_id)) = data.node_repo.s2_sorted_nodes.get(index) {
+                        let node = data.node_repo.nodes_by_id.get(node_id).ok_or_else(|| {
+                            format!("S2 index references missing node {}", node_id)
+                        })?;
+                        if node.lon < bounds.west
+                            || node.lon >= bounds.east
+                            || node.lat < bounds.south
+                            || node.lat > bounds.north
+                        {
+                            continue;
+                        }
+                        node_ids.push(node_id.clone());
+                    }
+                }
             }
-            node_ids.push(node.id.clone());
         }
         data.node_repo.tile_node_id_cache.insert(key, node_ids.clone());
         Ok(node_ids)
@@ -1492,7 +1556,16 @@ impl App {
 
     fn background_tick(&self) -> Result<(), String> {
         let mut data = self.inner.lock().unwrap();
-        self.tick_world_locked(&mut data)
+        self.tick_world_locked(&mut data)?;
+        let version = data.state.version;
+        let update = json!({
+            "type": "world-update",
+            "version": version,
+            "timestamp": now_ms()
+        })
+        .to_string();
+        let _ = self.ws_update_sender.try_send(update);
+        Ok(())
     }
 
     fn serve_static(&self, pathname: &str) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -1787,6 +1860,157 @@ fn tile_bounds(z: i64, x: i64, y: i64) -> BBox {
     }
 }
 
+fn s2_cover_for_bounds(bounds: &BBox, level: u64) -> Vec<CellID> {
+    let rect = S2Rect::from_degrees(bounds.south, bounds.west, bounds.north, bounds.east);
+    let mut cover = Vec::new();
+    for face in 0..6 {
+        let face_cell = CellID::from_face(face);
+        s2_cover_recursive(face_cell, level, &rect, &mut cover);
+    }
+    cover
+}
+
+fn s2_cover_recursive(cell: CellID, level: u64, rect: &S2Rect, cover: &mut Vec<CellID>) {
+    if cell.level() > level {
+        return;
+    }
+    if !s2_cell_intersects_rect(&cell, rect) {
+        return;
+    }
+    if cell.level() == level || s2_cell_contained_in_rect(&cell, rect) {
+        cover.push(cell.parent(level));
+        return;
+    }
+    for child in cell.children() {
+        s2_cover_recursive(child, level, rect, cover);
+    }
+}
+
+fn s2_cell_intersects_rect(cell: &CellID, rect: &S2Rect) -> bool {
+    let bound = s2_cell_rect(cell);
+    bound.intersects(rect)
+}
+
+fn s2_cell_contained_in_rect(cell: &CellID, rect: &S2Rect) -> bool {
+    let bound = s2_cell_rect(cell);
+    rect.contains(&bound)
+}
+
+fn s2_cell_rect(cell: &CellID) -> S2Rect {
+    s2::cell::Cell::from(*cell).rect_bound()
+}
+
+fn run_websocket_server(app: Arc<App>, update_rx: crossbeam_channel::Receiver<String>, port: u16) {
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(err) => {
+            eprintln!("Failed to create tokio runtime for WebSocket server: {err}");
+            return;
+        }
+    };
+
+    rt.block_on(async move {
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel::<String>(64);
+
+        let broadcast_tx2 = broadcast_tx.clone();
+        tokio::spawn(async move {
+            while let Ok(msg) = update_rx.recv() {
+                let _ = broadcast_tx2.send(msg);
+            }
+        });
+
+        let addr = format!("127.0.0.1:{port}");
+        let listener = match tokio::net::TcpListener::bind(&addr).await {
+            Ok(listener) => listener,
+            Err(err) => {
+                eprintln!("Failed to bind WebSocket server to {addr}: {err}");
+                return;
+            }
+        };
+        println!("WebSocket server listening on ws://{addr}/ws");
+
+        while let Ok((stream, _)) = listener.accept().await {
+            let broadcast_rx = broadcast_tx.subscribe();
+            let app = app.clone();
+            tokio::spawn(handle_ws_client(stream, app, broadcast_rx));
+        }
+    });
+}
+
+async fn handle_ws_client(
+    stream: tokio::net::TcpStream,
+    app: Arc<App>,
+    mut broadcast_rx: tokio::sync::broadcast::Receiver<String>,
+) {
+    let ws_stream = match tokio_tungstenite::accept_async(stream).await {
+        Ok(ws_stream) => ws_stream,
+        Err(err) => {
+            eprintln!("WebSocket handshake failed: {err}");
+            return;
+        }
+    };
+    let (mut ws_tx, mut ws_rx) = ws_stream.split();
+
+    let auth_timeout = tokio::time::Duration::from_secs(10);
+    let auth_result = tokio::time::timeout(auth_timeout, async {
+        while let Some(msg) = ws_rx.next().await {
+            let msg = match msg {
+                Ok(msg) => msg,
+                Err(_) => return None,
+            };
+            if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
+                if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                    if value.get("type").and_then(Value::as_str) == Some("auth") {
+                        if let Some(token) = value.get("token").and_then(Value::as_str) {
+                            let data = app.inner.lock().unwrap();
+                            if let Some(session) = data.state.sessions.get(token) {
+                                return Some(session.player_id.clone());
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+        }
+        None
+    })
+    .await;
+
+    let player_id = match auth_result {
+        Ok(Some(pid)) => {
+            let response = json!({
+                "type": "authResult",
+                "success": true,
+                "playerId": pid
+            })
+            .to_string();
+            let _ = ws_tx.send(tokio_tungstenite::tungstenite::Message::Text(response)).await;
+            pid
+        }
+        _ => {
+            let response = json!({
+                "type": "authResult",
+                "success": false
+            })
+            .to_string();
+            let _ = ws_tx.send(tokio_tungstenite::tungstenite::Message::Text(response)).await;
+            return;
+        }
+    };
+
+    while let Ok(msg) = broadcast_rx.recv().await {
+        if ws_tx
+            .send(tokio_tungstenite::tungstenite::Message::Text(msg))
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+
+    let _ = player_id;
+}
+
 fn parse_body_json(request: &mut Request) -> Result<Value, String> {
     let mut bytes = Vec::new();
     request
@@ -2011,7 +2235,15 @@ fn handle_request(app: &Arc<App>, mut request: Request) {
 
 fn main() {
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let app = Arc::new(App::new(root).expect("failed to initialize app"));
+    let (ws_update_sender, ws_update_receiver) = crossbeam_channel::unbounded::<String>();
+    let app = Arc::new(App::new(root, ws_update_sender).expect("failed to initialize app"));
+
+    let ws_app = app.clone();
+    let ws_port = std::env::var("WS_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(8003);
+    thread::spawn(move || run_websocket_server(ws_app, ws_update_receiver, ws_port));
 
     let ticker_app = app.clone();
     thread::spawn(move || loop {
@@ -2021,6 +2253,10 @@ fn main() {
         }
     });
 
+    if let Err(error) = app.warm_node_repo() {
+        eprintln!("Failed to warm node repository: {error}");
+    }
+
     let port = std::env::var("PORT")
         .ok()
         .or_else(|| std::env::args().nth(1))
@@ -2028,6 +2264,7 @@ fn main() {
     let address = format!("127.0.0.1:{port}");
     let server = Server::http(&address).unwrap_or_else(|error| panic!("failed to bind {address}: {error}"));
     println!("Game server listening on http://localhost:{port}");
+    println!("WebSocket server listening on ws://localhost:{ws_port}/ws");
 
     for request in server.incoming_requests() {
         let app = app.clone();
