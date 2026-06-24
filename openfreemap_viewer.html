@@ -274,6 +274,7 @@
     let lastVisibleTileRefreshStartedAt = 0;
     let activeVisibleTileRequestKey = "";
     let lastRenderedTileRequestKey = "";
+    let skipNextTileRefreshForZoom = false;
     let connectableRefreshTimer = null;
     let connectableRefreshVersion = 0;
     let connectableNodeIds = new Set();
@@ -298,6 +299,8 @@
     const ATTACK_RENDER_INTERVAL_MS = 33;
     let hoveredAttackKey = null;
     let hoveredPreviewTargetNodeId = null;
+    let hoverPreviewTargetId = null;
+    let hoverPreviewTimer = 0;
     const nodeTileResponseCache = new Map();
     const connectionCanvasContext = connectionCanvasEl.getContext("2d");
     const loadingScreenEl = document.getElementById("loadingScreen");
@@ -742,6 +745,10 @@
         }
         selectedNodeTargets = [...(payload.targets?.features || [])].sort((left, right) => String(left?.properties?.id || "").localeCompare(String(right?.properties?.id || "")));
         connectableNodeIds = new Set(selectedNodeTargets.map((feature) => String(feature?.properties?.id || "")).filter(Boolean));
+        map.getSource("connectable-nodes")?.setData({
+          type: "FeatureCollection",
+          features: selectedNodeTargets,
+        });
         renderSelectedNodeTargets();
       } catch (error) {
         if (requestVersion !== selectedNodeTargetsRequestVersion) {
@@ -827,12 +834,15 @@
         || selectedNodeTargets.find((feature) => String(feature?.properties?.id || "") === String(targetNodeId))
         || renderedNodeFeatures.find((feature) => String(feature?.properties?.id || "") === String(targetNodeId))
         || null;
-      if (!activeRoute && !selectedNodeTargets.some((feature) => String(feature?.properties?.id || "") === String(targetNodeId))) {
+      let isAdjacentTarget = connectableNodeIds.has(String(targetNodeId))
+        || selectedNodeTargets.some((feature) => String(feature?.properties?.id || "") === String(targetNodeId));
+      if (!activeRoute && !isAdjacentTarget) {
         await refreshSelectedNodeTargets();
         targetFeature = selectedNodeTargets.find((feature) => String(feature?.properties?.id || "") === String(targetNodeId))
           || targetFeature;
+        isAdjacentTarget = connectableNodeIds.has(String(targetNodeId))
+          || selectedNodeTargets.some((feature) => String(feature?.properties?.id || "") === String(targetNodeId));
       }
-      const isAdjacentTarget = selectedNodeTargets.some((feature) => String(feature?.properties?.id || "") === String(targetNodeId));
       if (!activeRoute && !isAdjacentTarget) {
         if (String(targetFeature?.properties?.ownerState || "") === "self") {
           selectSenderNode(targetFeature, `Selected node ${targetNodeId}.`);
@@ -1733,6 +1743,9 @@
       if (connectableRefreshTimer) {
         window.clearTimeout(connectableRefreshTimer);
       }
+      if (connectableNodeIds.size) {
+        return;
+      }
       connectableRefreshTimer = window.setTimeout(() => {
         connectableRefreshTimer = null;
         refreshConnectableTargets().catch((error) => setStatus(`Adjacent target lookup failed: ${error.message}`));
@@ -1797,6 +1810,36 @@
         }
       }
     }
+    function scheduleHoverPreview(targetFeature) {
+      const targetId = String(targetFeature?.properties?.id || "");
+      if (!targetId || hoverPreviewTargetId === targetId) {
+        return;
+      }
+      hoverPreviewTargetId = targetId;
+      if (hoverPreviewTimer) {
+        window.clearTimeout(hoverPreviewTimer);
+        hoverPreviewTimer = 0;
+      }
+      const cacheKey = `${selectedNodeId}:${targetId}`;
+      if (previewPathCache.has(cacheKey)) {
+        setPreviewTarget(targetFeature);
+        return;
+      }
+      hoverPreviewTimer = window.setTimeout(() => {
+        hoverPreviewTimer = 0;
+        if (hoverPreviewTargetId !== targetId) {
+          return;
+        }
+        setPreviewTarget(targetFeature);
+      }, 80);
+    }
+    function clearHoverPreviewSchedule() {
+      hoverPreviewTargetId = null;
+      if (hoverPreviewTimer) {
+        window.clearTimeout(hoverPreviewTimer);
+        hoverPreviewTimer = 0;
+      }
+    }
 
     function enterConnectMode(statusMessage = "") {
       if (!selectedNodeFeature || String(selectedNodeFeature?.properties?.ownerState || "") !== "self") {
@@ -1852,11 +1895,12 @@
         updateSelectionStatus();
         return;
       }
-      void setPreviewTarget(feature);
+      scheduleHoverPreview(feature);
     }
 
     function handleNodeLeave() {
       map.getCanvas().style.cursor = "";
+      clearHoverPreviewSchedule();
       if (connectPreviewMode && selectedNodeFeature) {
         clearPreviewLine();
         updateSelectionStatus();
@@ -2426,7 +2470,9 @@
       map.getSource("game-nodes").setData({ type: "FeatureCollection", features: displayFeatures });
       renderedNodeCountEl.textContent = displayFeatures.length.toLocaleString();
       if (selectedNodeFeature && sessionToken && connectPreviewMode) {
-        scheduleConnectableTargetsRefresh(80);
+        if (!connectableNodeIds.size) {
+          scheduleConnectableTargetsRefresh(80);
+        }
       } else {
         clearConnectableTargets();
       }
@@ -2903,7 +2949,16 @@
         inspectedNodeId = null;
         updateNodeInfo(null);
       });
-      map.on("moveend", () => { scheduleVisibleTileRefresh(); });
+      map.on("zoomstart", () => { skipNextTileRefreshForZoom = true; });
+      map.on("zoomend", () => { skipNextTileRefreshForZoom = true; });
+      map.on("moveend", () => {
+        const causedByZoom = skipNextTileRefreshForZoom;
+        skipNextTileRefreshForZoom = false;
+        if (causedByZoom && map.getZoom() >= NODE_MIN_ZOOM && renderedNodeFeatures.length) {
+          return;
+        }
+        scheduleVisibleTileRefresh();
+      });
 
       installButtonPressEffects();
       loadLoginFormState();
