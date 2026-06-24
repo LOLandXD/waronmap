@@ -194,7 +194,7 @@
     const MAX_VISIBLE_NODE_TILES = 16;
     const MAX_CONNECTABLE_CANDIDATES = 1500;
     const VISIBLE_TILE_REFRESH_COOLDOWN_MS = 5000;
-    const NODE_TILE_CACHE_TTL_MS = 2200;
+    const NODE_TILE_CACHE_TTL_MS = 5 * 60 * 1000;
     const ZOOM_IN_MESSAGE = "Please zoom in to see nodes.";
     const DEFAULT_SEND_PER_TICK = 1;
     const HIDE_NODE_INFORMATION_TEST = false;
@@ -261,6 +261,7 @@
     let stateBoundaryCollection = null;
     let currentGenerationFeatures = [];
     let renderedNodeFeatures = [];
+    let renderedNodeFeatureMap = new Map();
     let selectedNodeFeature = null;
     let previewTargetNodeId = null;
     let connectPreviewMode = false;
@@ -272,6 +273,7 @@
     let activeVisibleTileAbortController = null;
     let lastVisibleTileRefreshStartedAt = 0;
     let activeVisibleTileRequestKey = "";
+    let lastRenderedTileRequestKey = "";
     let connectableRefreshTimer = null;
     let connectableRefreshVersion = 0;
     let connectableNodeIds = new Set();
@@ -1055,6 +1057,46 @@
     }
     function clearNodeTileResponseCache() {
       nodeTileResponseCache.clear();
+      lastRenderedTileRequestKey = "";
+    }
+    function nodeFeatureStateKey(feature) {
+      const props = feature?.properties || {};
+      return [
+        String(props.id || ""),
+        Number(props.army || 0),
+        String(props.ownerState || ""),
+        String(props.ownerId || ""),
+        String(props.ownerUsername || ""),
+        Boolean(props.canAttack),
+      ].join("|");
+    }
+    function visibleNodeFeaturesEqual(currentMap, nextMap) {
+      if (currentMap.size !== nextMap.size) {
+        return false;
+      }
+      for (const [id, feature] of nextMap) {
+        const current = currentMap.get(id);
+        if (!current) {
+          return false;
+        }
+        if (nodeFeatureStateKey(current) !== nodeFeatureStateKey(feature)) {
+          return false;
+        }
+      }
+      return true;
+    }
+    function buildNodeFeatureMap(features) {
+      const map = new Map();
+      for (const feature of features || []) {
+        const id = String(feature?.properties?.id || "");
+        if (!id) {
+          continue;
+        }
+        if (!map.has(id)) {
+          map.set(id, feature);
+        }
+      }
+      return map;
     }
     function spreadOverlappingNodeFeatures(features) {
       const grouped = new Map();
@@ -2372,6 +2414,11 @@
       if (requestVersion !== visibleTileRefreshVersion) {
         return;
       }
+      const nextMap = buildNodeFeatureMap(features);
+      if (visibleNodeFeaturesEqual(renderedNodeFeatureMap, nextMap)) {
+        return;
+      }
+      renderedNodeFeatureMap = nextMap;
       const displayFeatures = spreadOverlappingNodeFeatures(features);
       renderedNodeFeatures = displayFeatures;
       syncInspectedNodeFromRenderedFeatures(displayFeatures);
@@ -2392,6 +2439,7 @@
         activeVisibleTileAbortController = null;
         activeVisibleTileRequestKey = "";
         renderedNodeFeatures = [];
+        renderedNodeFeatureMap.clear();
         inspectedNodeId = null;
         updateNodeInfo(null);
         map.getSource("game-nodes").setData(emptyFeatureCollection());
@@ -2405,6 +2453,10 @@
       const requests = currentTileRequests();
       const requestKey = `${currentPlayerId || "anon"}|${requests.map(({ z, x, y }) => `${z}/${x}/${y}`).join(",")}`;
       if (!force && activeVisibleTileRequestKey === requestKey && activeVisibleTileAbortController) {
+        return;
+      }
+      const allTilesCached = requests.every(({ z, x, y }) => Boolean(getCachedNodeTilePayload(z, x, y)));
+      if (!force && requestKey === lastRenderedTileRequestKey && allTilesCached) {
         return;
       }
       lastVisibleTileRefreshStartedAt = Date.now();
@@ -2476,6 +2528,7 @@
         throw firstFailure?.reason || new Error("No node tiles loaded.");
       }
       renderVisibleNodeFeatures(features, requestVersion);
+      lastRenderedTileRequestKey = requestKey;
     }
 
     async function maybeRefreshVisibleTiles(force = false) {
@@ -2565,6 +2618,8 @@
         if (now - lastWorldUpdateRefreshAt >= WORLD_UPDATE_THROTTLE_MS) {
           lastWorldUpdateRefreshAt = now;
           void refreshGameState();
+          clearNodeTileResponseCache();
+          scheduleVisibleTileRefresh(0, true);
         }
       }
     }
