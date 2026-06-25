@@ -2222,7 +2222,7 @@
           continue;
         }
         const previewTotalPx = totalLineLengthPx(previewCoords);
-        const previewPaddingPx = Math.min(routeInteriorPaddingPx(), Math.max((previewTotalPx / 2) - 1, 0));
+        const previewPaddingPx = Math.min(routeInteriorPaddingPx(), previewTotalPx / 3);
         const trimmedPreviewCoords = trimmedLineCoordsByPixels(previewCoords, previewPaddingPx, Math.max(previewPaddingPx, previewTotalPx - previewPaddingPx));
         const previewColor = hoveredPreviewTargetNodeId && previewTargetNodeId === hoveredPreviewTargetNodeId
           ? "rgba(250, 204, 21, 0.98)"
@@ -2252,7 +2252,7 @@
         const dashSpeedPerSecond = DASH_CYCLE_LEN * Math.max(0, effectiveSendPerTick);
         const dashOffset = marchingDashOffset(dashSpeedPerSecond, timestampMs);
         const totalPx = totalLineLengthPx(coords);
-        const edgePaddingPx = Math.min(routeInteriorPaddingPx(), Math.max((totalPx / 2) - 1, 0));
+        const edgePaddingPx = Math.min(routeInteriorPaddingPx(), totalPx / 3);
         const trimmedCoords = trimmedLineCoordsByPixels(coords, edgePaddingPx, Math.max(edgePaddingPx, totalPx - edgePaddingPx));
         if (isHoveredAttack) {
           drawMovingTransportLine(trimmedCoords, "rgba(255, 255, 255, 0.98)", zoomWidth + 5.4, dashOffset);
@@ -2506,8 +2506,7 @@
       const suffix = sessionToken ? `&token=${encodeURIComponent(sessionToken)}` : "";
       const features = [];
       const seen = new Set();
-      const mergePayload = (payload) => {
-        let changed = false;
+      const addPayload = (payload) => {
         for (const feature of payload.nodes?.features || []) {
           const id = String(feature.properties?.id || "");
           if (!id || seen.has(id)) {
@@ -2515,36 +2514,43 @@
           }
           seen.add(id);
           features.push(feature);
-          changed = true;
-        }
-        if (changed) {
-          renderVisibleNodeFeatures(features, requestVersion);
         }
       };
-      const results = await Promise.allSettled(
-        requests.map(async ({ z, x, y }) => {
-          if (!force) {
-            const cachedPayload = getCachedNodeTilePayload(z, x, y);
-            if (cachedPayload) {
-              if (requestVersion !== visibleTileRefreshVersion || requestAbortController.signal.aborted) {
-                return null;
-              }
-              mergePayload(cachedPayload);
-              return cachedPayload;
-            }
+      if (allTilesCached) {
+        for (const { z, x, y } of requests) {
+          const cachedPayload = getCachedNodeTilePayload(z, x, y);
+          if (cachedPayload) {
+            addPayload(cachedPayload);
           }
-          const payload = await fetchJson(`${NODE_TILE_URL}?z=${z}&x=${x}&y=${y}${suffix}`, {
-            cache: "no-store",
-            signal: requestAbortController.signal,
-          });
-          if (requestVersion !== visibleTileRefreshVersion || requestAbortController.signal.aborted) {
-            return null;
+        }
+        renderVisibleNodeFeatures(features, requestVersion);
+        if (activeVisibleTileAbortController === requestAbortController) {
+          activeVisibleTileAbortController = null;
+        }
+        if (activeVisibleTileRequestKey === requestKey) {
+          activeVisibleTileRequestKey = "";
+        }
+        lastRenderedTileRequestKey = requestKey;
+        return;
+      }
+      const tilePromises = requests.map(async ({ z, x, y }) => {
+        if (!force) {
+          const cachedPayload = getCachedNodeTilePayload(z, x, y);
+          if (cachedPayload) {
+            return cachedPayload;
           }
-          setCachedNodeTilePayload(z, x, y, payload);
-          mergePayload(payload);
-          return payload;
-        })
-      );
+        }
+        const payload = await fetchJson(`${NODE_TILE_URL}?z=${z}&x=${x}&y=${y}${suffix}`, {
+          cache: "no-store",
+          signal: requestAbortController.signal,
+        });
+        if (requestAbortController.signal.aborted) {
+          return null;
+        }
+        setCachedNodeTilePayload(z, x, y, payload);
+        return payload;
+      });
+      const results = await Promise.allSettled(tilePromises);
       if (requestVersion !== visibleTileRefreshVersion) {
         return;
       }
@@ -2564,6 +2570,9 @@
         }
         const firstFailure = results.find((result) => result.status === "rejected");
         throw firstFailure?.reason || new Error("No node tiles loaded.");
+      }
+      for (const payload of payloads) {
+        addPayload(payload);
       }
       renderVisibleNodeFeatures(features, requestVersion);
       lastRenderedTileRequestKey = requestKey;
@@ -2657,7 +2666,7 @@
           lastWorldUpdateRefreshAt = now;
           void refreshGameState();
           clearNodeTileResponseCache();
-          scheduleVisibleTileRefresh(0, true);
+          scheduleVisibleTileRefresh(500, false);
         }
       }
     }
