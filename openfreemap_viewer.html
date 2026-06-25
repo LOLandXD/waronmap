@@ -7,30 +7,32 @@
   <link href="/vendor/maplibre-gl.css" rel="stylesheet">
   <style>
     * { box-sizing: border-box; }
-    html, body { margin: 0; height: 100%; font-family: Arial, Helvetica, sans-serif; }
+    html, body { margin: 0; height: 100%; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; }
     #map { width: 100%; height: 100vh; }
     .connection-canvas { position: absolute; inset: 0; width: 100%; height: 100vh; z-index: 2; pointer-events: none; }
-    .overlay { position: absolute; z-index: 3; color: #e5eefc; background: rgba(15, 23, 42, 0.90); backdrop-filter: blur(8px); box-shadow: 0 12px 30px rgba(15, 23, 42, 0.25); border-radius: 14px; }
-    .top-bar { top: 16px; left: 50%; transform: translateX(-50%); width: min(520px, calc(100vw - 32px)); padding: 14px 16px; pointer-events: auto; }
-    .top-bar.hidden { display: none; }
-    .panel { top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(420px, calc(100vw - 32px)); max-height: calc(100vh - 56px); overflow-y: auto; padding: 14px 16px; }
+    .overlay { position: absolute; z-index: 3; color: #f8fafc; background: rgba(15, 23, 42, 0.82); backdrop-filter: blur(14px); box-shadow: 0 20px 50px rgba(2, 6, 23, 0.55); border: 1px solid rgba(148, 163, 184, 0.14); border-radius: 18px; }
+    .panel { top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(440px, calc(100vw - 32px)); max-height: calc(100vh - 40px); overflow-y: auto; padding: 0; }
     .panel.hidden { display: none; }
-    .show-panel-button { position: absolute; top: 16px; left: 16px; z-index: 3; display: none; border: 0; border-radius: 8px; padding: 8px 12px; color: #fff; background: rgba(37, 99, 235, 0.96); cursor: pointer; }
+    .panel-header { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 20px 14px; background: linear-gradient(180deg, rgba(15,23,42,0.95), rgba(15,23,42,0.82)); border-bottom: 1px solid rgba(148, 163, 184, 0.12); }
+    .panel-header h1 { font-size: 20px; font-weight: 800; letter-spacing: -0.02em; background: linear-gradient(90deg, #60a5fa, #a78bfa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .panel-body { padding: 18px 20px 22px; }
+    .panel-subtitle { color: #94a3b8; font-size: 13px; margin-bottom: 14px; line-height: 1.5; }
+    .show-panel-button { position: absolute; top: 16px; left: 16px; z-index: 3; display: none; align-items: center; gap: 8px; border: 0; border-radius: 999px; padding: 10px 16px; font-size: 14px; font-weight: 700; color: #fff; background: linear-gradient(90deg, #2563eb, #7c3aed); cursor: pointer; box-shadow: 0 10px 24px rgba(37, 99, 235, 0.35); }
     .show-panel-button.visible { display: inline-flex; }
-    .show-top-bar-button { position: absolute; top: 16px; left: 50%; z-index: 3; display: none; transform: translateX(-50%); border: 0; border-radius: 8px; padding: 8px 12px; color: #fff; background: rgba(37, 99, 235, 0.96); cursor: pointer; }
-    .show-top-bar-button.visible { display: inline-flex; }
-    .node-info { right: 16px; bottom: 16px; width: min(320px, calc(100vw - 32px)); padding: 12px 14px; font-size: 13px; }
+    .node-info { right: 16px; bottom: 16px; width: min(340px, calc(100vw - 32px)); padding: 0; font-size: 13px; }
     .node-info.hidden { display: none; }
-    .node-info strong { display: block; margin-bottom: 8px; font-size: 15px; }
-    .node-info .status { margin-top: 6px; }
-    .route-controls { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(148, 163, 184, 0.18); }
+    .node-info-header { padding: 14px 16px 10px; border-bottom: 1px solid rgba(148, 163, 184, 0.12); }
+    .node-info-header strong { display: block; font-size: 15px; color: #e2e8f0; }
+    .node-info-body { padding: 12px 16px 16px; }
+    .node-info .status { margin-top: 8px; }
+    .route-controls { margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(148, 163, 184, 0.14); }
     .connect-mode-actions { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
     .connect-mode-actions.hidden { display: none; }
-    .icon-button { width: 36px; height: 36px; padding: 0; border-radius: 999px; font-size: 24px; line-height: 1; display: inline-flex; align-items: center; justify-content: center; }
+    .icon-button { width: 38px; height: 38px; padding: 0; border-radius: 999px; font-size: 24px; line-height: 1; display: inline-flex; align-items: center; justify-content: center; }
     .shortcut-button { padding: 8px 12px; border-radius: 999px; font-size: 12px; letter-spacing: 0.04em; }
-    .route-controls label { display: block; color: #cbd5e1; font-size: 12px; margin-bottom: 4px; }
-    .route-controls .actions { margin-top: 6px; }
-    .route-list { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(148, 163, 184, 0.18); }
+    .route-controls label { display: block; color: #94a3b8; font-size: 12px; margin-bottom: 4px; }
+    .route-controls .actions { margin-top: 8px; }
+    .route-list { margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(148, 163, 184, 0.14); }
     .route-list.hidden { display: none; }
     .route-list-title { margin-bottom: 8px; color: #e2e8f0; font-size: 13px; font-weight: 700; }
     .route-row { display: grid; gap: 6px; padding: 8px 0; border-top: 1px solid rgba(148, 163, 184, 0.12); }
@@ -41,34 +43,48 @@
     .route-row-controls { display: flex; gap: 8px; align-items: center; }
     .route-row-controls input { margin: 0; width: 86px; }
     .route-row-controls button { padding: 6px 10px; font-size: 12px; }
-    .hint { font-size: 12px; color: #94a3b8; }
-    .loading-screen { position: fixed; inset: 0; z-index: 100; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; background: #0f172a; color: #e5eefc; transition: opacity 0.4s ease, visibility 0.4s ease; }
+    .hint { font-size: 12px; color: #94a3b8; line-height: 1.45; }
+    .loading-screen { position: fixed; inset: 0; z-index: 100; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; background: #020617; color: #f8fafc; transition: opacity 0.4s ease, visibility 0.4s ease; }
     .loading-screen.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
-    .loading-screen h1 { margin: 0; font-size: 22px; }
+    .loading-screen h1 { margin: 0; font-size: 26px; font-weight: 800; letter-spacing: -0.02em; background: linear-gradient(90deg, #60a5fa, #a78bfa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
     .loading-screen p { margin: 0; font-size: 14px; color: #94a3b8; }
     .loading-screen .progress-track { width: min(360px, calc(100vw - 48px)); height: 10px; overflow: hidden; border-radius: 999px; background: rgba(148, 163, 184, 0.22); }
     .loading-screen .progress-fill.indeterminate { width: 100% !important; background: linear-gradient(90deg, rgba(96,165,250,0.35), rgba(37,99,235,0.95), rgba(96,165,250,0.35)); background-size: 200% 100%; animation: progress-shift 1.4s linear infinite; }
-    .top-bar-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
-    .top-bar-header h1 { margin-bottom: 0; }
-    .top-bar-close { flex: 0 0 auto; padding: 6px 10px; font-size: 12px; }
-    h1 { margin: 0 0 8px; font-size: 18px; }
-    p { margin: 0 0 10px; line-height: 1.45; font-size: 14px; }
+    h1 { margin: 0; font-size: 18px; }
+    p { margin: 0; line-height: 1.45; font-size: 14px; }
     .progress-track { width: 100%; height: 10px; overflow: hidden; border-radius: 999px; background: rgba(148, 163, 184, 0.22); margin-top: 8px; }
     .progress-fill { width: 0%; height: 100%; border-radius: 999px; background: linear-gradient(90deg, #60a5fa, #2563eb); transition: width 0.18s ease; }
     .progress-fill.indeterminate { width: 100% !important; background: linear-gradient(90deg, rgba(96,165,250,0.35), rgba(37,99,235,0.95), rgba(96,165,250,0.35)); background-size: 200% 100%; animation: progress-shift 1.4s linear infinite; }
     .progress-label { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; color: #cbd5e1; }
-    .row, .stat { display: flex; justify-content: space-between; gap: 10px; }
-    .stats { display: grid; gap: 8px; margin: 10px 0; }
-    .status { white-space: pre-wrap; margin-top: 10px; color: #cbd5e1; font-size: 13px; }
-    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-    .section { margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(148, 163, 184, 0.18); }
-    input { width: 100%; margin-top: 6px; margin-bottom: 8px; padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(148, 163, 184, 0.3); background: rgba(15, 23, 42, 0.65); color: #fff; }
-    button { border: 0; border-radius: 8px; padding: 8px 12px; font-weight: 600; color: #fff; background: #2563eb; cursor: pointer; box-shadow: 0 8px 18px rgba(37, 99, 235, 0.24); transition: transform 0.14s ease, box-shadow 0.18s ease, filter 0.18s ease, opacity 0.18s ease; }
-    button:hover { transform: translateY(-1px); filter: brightness(1.06); box-shadow: 0 12px 24px rgba(37, 99, 235, 0.30); }
+    .row, .stat { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+    .stats { display: grid; gap: 8px; margin: 12px 0; }
+    .stat { padding: 8px 10px; background: rgba(30, 41, 59, 0.55); border-radius: 10px; }
+    .stat span { color: #94a3b8; font-size: 12px; }
+    .stat strong { color: #f8fafc; font-size: 13px; font-weight: 700; }
+    .status { white-space: pre-wrap; margin-top: 10px; color: #cbd5e1; font-size: 13px; line-height: 1.45; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .section { margin-top: 14px; padding-top: 14px; border-top: 1px solid rgba(148, 163, 184, 0.12); }
+    .section:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+    .section-title { font-size: 13px; font-weight: 700; color: #e2e8f0; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+    input { width: 100%; margin-top: 6px; margin-bottom: 8px; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(148, 163, 184, 0.25); background: rgba(30, 41, 59, 0.55); color: #fff; font-size: 14px; outline: none; transition: border-color 0.18s ease, box-shadow 0.18s ease; }
+    input:focus { border-color: #60a5fa; box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.18); }
+    button { border: 0; border-radius: 999px; padding: 9px 16px; font-weight: 700; font-size: 13px; color: #fff; background: linear-gradient(90deg, #2563eb, #4f46e5); cursor: pointer; box-shadow: 0 8px 18px rgba(37, 99, 235, 0.28); transition: transform 0.14s ease, box-shadow 0.18s ease, filter 0.18s ease, opacity 0.18s ease; }
+    button:hover { transform: translateY(-1px); filter: brightness(1.08); box-shadow: 0 12px 26px rgba(37, 99, 235, 0.36); }
     button:active, button.button-press { transform: translateY(1px) scale(0.97); filter: brightness(0.96); box-shadow: 0 4px 10px rgba(15, 23, 42, 0.28); }
     button:disabled { opacity: 0.6; cursor: wait; transform: none; filter: none; box-shadow: 0 6px 12px rgba(15, 23, 42, 0.16); }
-    button.secondary { background: #334155; }
-    button.secondary:hover { box-shadow: 0 12px 24px rgba(15, 23, 42, 0.28); }
+    button.secondary { background: #334155; box-shadow: 0 6px 14px rgba(15, 23, 42, 0.25); }
+    button.secondary:hover { box-shadow: 0 10px 22px rgba(15, 23, 42, 0.32); }
+    .panel-close { width: 32px; height: 32px; padding: 0; border-radius: 999px; font-size: 18px; background: rgba(30, 41, 59, 0.8); box-shadow: none; }
+    .panel-close:hover { background: rgba(51, 65, 85, 0.9); }
+    .leaderboard-list { display: grid; gap: 6px; }
+    .leaderboard-row { display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 10px; background: rgba(30, 41, 59, 0.45); }
+    .leaderboard-row.self { background: rgba(37, 99, 235, 0.18); border: 1px solid rgba(96, 165, 250, 0.35); }
+    .leaderboard-rank { font-size: 12px; font-weight: 800; color: #94a3b8; text-align: center; }
+    .leaderboard-row.self .leaderboard-rank { color: #60a5fa; }
+    .leaderboard-name { font-size: 13px; font-weight: 600; color: #f8fafc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .leaderboard-score { text-align: right; font-size: 12px; color: #cbd5e1; }
+    .leaderboard-score strong { display: block; color: #f8fafc; font-size: 13px; }
+    .leaderboard-empty { color: #94a3b8; font-size: 13px; padding: 10px; text-align: center; }
     @keyframes progress-shift {
       0% { background-position: 200% 0; }
       100% { background-position: -200% 0; }
@@ -83,52 +99,54 @@
   </div>
   <div id="map"></div>
   <canvas id="connectionCanvas" class="connection-canvas"></canvas>
-  <div class="overlay top-bar" id="topBar">
-    <div class="top-bar-header">
-      <h1>Node Generation Progress</h1>
-      <button id="hideTopBarButton" class="secondary top-bar-close" type="button">Hide</button>
-    </div>
-    <p id="loadingMessage">Preparing nodes for Maine and New Hampshire...</p>
-    <div class="progress-label"><span id="loadingProgressText">0 / 0</span><span id="loadingProgressPercent">0%</span></div>
-    <div class="progress-track"><div id="loadingProgressFill" class="progress-fill"></div></div>
-  </div>
-  <button id="showTopBarButton" class="show-top-bar-button" type="button">Show Progress</button>
   <div class="overlay panel" id="panel">
-    <h1 id="panelTitle">Maine and New Hampshire Game</h1>
-    <p>White nodes start at 10 army. Click your node, then click an adjacent node.</p>
-    <div class="section">
-      <div id="authSummary" class="status">Register or log in to claim 10 starting nodes.</div>
-      <input id="usernameInput" placeholder="username">
-      <input id="passwordInput" type="password" placeholder="password">
-      <div class="actions">
-        <button id="registerButton" type="button">Register</button>
-        <button id="loginButton" type="button" class="secondary">Login</button>
-        <button id="logoutButton" type="button" class="secondary">Logout</button>
-      </div>
+    <div class="panel-header">
+      <h1 id="panelTitle">War on Map</h1>
+      <button id="hidePanelButton" class="panel-close secondary" type="button" aria-label="Close">×</button>
     </div>
-    <div class="section">
-      <div class="stats">
-        <div class="stat"><span>Region</span><strong id="regionText">Maine, New Hampshire</strong></div>
-        <div class="stat"><span>Build progress</span><strong id="buildProgressInline">0 / 0</strong></div>
-        <div class="stat"><span>Preview nodes</span><strong id="previewNodeCount">0</strong></div>
-        <div class="stat"><span>Rendered nodes</span><strong id="renderedNodeCount">0</strong></div>
-        <div class="stat"><span>Active attacks</span><strong id="activeAttackCount">0</strong></div>
-        <div class="stat"><span>Selected node</span><strong id="selectedNodeText">None</strong></div>
+    <div class="panel-body">
+      <p class="panel-subtitle">White nodes start with 10 army. Select one of your green nodes, then click an adjacent node to move troops.</p>
+      <div class="section">
+        <div id="authSummary" class="status">Register or log in to claim 10 starting nodes.</div>
+        <input id="usernameInput" placeholder="username" autocomplete="username">
+        <input id="passwordInput" type="password" placeholder="password" autocomplete="current-password">
+        <div class="actions">
+          <button id="registerButton" type="button">Register</button>
+          <button id="loginButton" type="button" class="secondary">Login</button>
+          <button id="logoutButton" type="button" class="secondary">Logout</button>
+        </div>
       </div>
-      <div class="progress-track"><div id="tileProgressFill" class="progress-fill"></div></div>
-      <div id="status" class="status">Waiting for build progress and account session.</div>
-    </div>
-    <div class="section">
-      <div class="actions">
-        <button id="locateNodesButton" type="button">Locate My Nodes</button>
-        <button id="hidePanelButton" type="button" class="secondary">Hide Panel</button>
+      <div class="section">
+        <div class="section-title">📊 Live Stats</div>
+        <div class="stats">
+          <div class="stat"><span>Region</span><strong id="regionText">Maine, New Hampshire</strong></div>
+          <div class="stat"><span>Rendered nodes</span><strong id="renderedNodeCount">0</strong></div>
+          <div class="stat"><span>Active attacks</span><strong id="activeAttackCount">0</strong></div>
+          <div class="stat"><span>Selected node</span><strong id="selectedNodeText">None</strong></div>
+        </div>
+      </div>
+      <div class="section">
+        <div class="section-title">🏆 Leaderboard</div>
+        <div id="leaderboardList" class="leaderboard-list">
+          <div class="leaderboard-empty">Loading leaderboard...</div>
+        </div>
+        <div class="actions">
+          <button id="refreshLeaderboardButton" type="button" class="secondary">Refresh</button>
+          <button id="locateNodesButton" type="button">Locate My Nodes</button>
+        </div>
+      </div>
+      <div class="section">
+        <div id="status" class="status">Waiting for server...</div>
       </div>
     </div>
   </div>
-  <button id="showPanelButton" class="show-panel-button" type="button">Show Panel</button>
+  <button id="showPanelButton" class="show-panel-button" type="button">☰ Menu</button>
   <div class="overlay node-info hidden" id="nodeInfo">
-    <strong id="nodeInfoTitle">Node Info</strong>
-    <div class="stats">
+    <div class="node-info-header">
+      <strong id="nodeInfoTitle">Node Info</strong>
+    </div>
+    <div class="node-info-body">
+      <div class="stats">
       <div class="stat"><span>Node</span><strong id="nodeInfoId">None</strong></div>
       <div class="stat"><span>Owner</span><strong id="nodeInfoOwner">No node selected</strong></div>
       <div class="stat"><span>Army</span><strong id="nodeInfoArmy">0</strong></div>
@@ -157,6 +175,7 @@
       <div id="nodeRoutesList"></div>
     </div>
       <div id="nodeInfoStatus" class="status">Click any visible node to inspect it here.</div>
+    </div>
   </div>
   <script src="/vendor/maplibre-gl.js"></script>
   <script>
@@ -176,7 +195,6 @@
     const SESSION_KEY = "node-game-session-v1";
     const LOGIN_FORM_KEY = "node-game-login-form-v1";
     const PANEL_KEY = "node-game-panel-v1";
-    const TOP_BAR_KEY = "node-game-top-bar-v1";
     const LAST_BUILD_STATUS_KEY = "node-game-build-status-v1";
     const LAST_OWNED_VIEW_KEY = "node-game-owned-view-v1";
     const BUILD_POLL_MS = 3000;
@@ -199,32 +217,22 @@
     const DEFAULT_SEND_PER_TICK = 1;
     const HIDE_NODE_INFORMATION_TEST = false;
 
-    const topBarEl = document.getElementById("topBar");
-    const showTopBarButton = document.getElementById("showTopBarButton");
-    const hideTopBarButton = document.getElementById("hideTopBarButton");
     const panelEl = document.getElementById("panel");
     const showPanelButton = document.getElementById("showPanelButton");
     const hidePanelButton = document.getElementById("hidePanelButton");
     const locateNodesButton = document.getElementById("locateNodesButton");
+    const refreshLeaderboardButton = document.getElementById("refreshLeaderboardButton");
+    const leaderboardListEl = document.getElementById("leaderboardList");
     const usernameInput = document.getElementById("usernameInput");
     const passwordInput = document.getElementById("passwordInput");
     const registerButton = document.getElementById("registerButton");
     const loginButton = document.getElementById("loginButton");
     const logoutButton = document.getElementById("logoutButton");
     const authSummaryEl = document.getElementById("authSummary");
-    const loadingMessageEl = document.getElementById("loadingMessage");
-    const loadingProgressTextEl = document.getElementById("loadingProgressText");
-    const loadingProgressPercentEl = document.getElementById("loadingProgressPercent");
-    const loadingProgressFillEl = document.getElementById("loadingProgressFill");
-    const buildProgressInlineEl = document.getElementById("buildProgressInline");
-    const previewNodeCountEl = document.getElementById("previewNodeCount");
     const renderedNodeCountEl = document.getElementById("renderedNodeCount");
     const activeAttackCountEl = document.getElementById("activeAttackCount");
     const selectedNodeTextEl = document.getElementById("selectedNodeText");
     const statusEl = document.getElementById("status");
-    const tileProgressFillEl = document.getElementById("tileProgressFill");
-    const regionTextEl = document.getElementById("regionText");
-    const panelTitleEl = document.getElementById("panelTitle");
     const nodeInfoEl = document.getElementById("nodeInfo");
     const nodeInfoTitleEl = document.getElementById("nodeInfoTitle");
     const nodeInfoIdEl = document.getElementById("nodeInfoId");
@@ -1208,12 +1216,43 @@
         hideMainPanel(false);
       }
     }
-    function saveTopBarState() { localStorage.setItem(TOP_BAR_KEY, topBarEl.classList.contains("hidden") ? "hidden" : "visible"); }
-    function loadTopBarState() { if (localStorage.getItem(TOP_BAR_KEY) === "hidden") { topBarEl.classList.add("hidden"); showTopBarButton.classList.add("visible"); } }
     hidePanelButton.addEventListener("click", () => { hideMainPanel(true); });
     showPanelButton.addEventListener("click", () => { showMainPanel(true); });
-    hideTopBarButton.addEventListener("click", () => { topBarEl.classList.add("hidden"); showTopBarButton.classList.add("visible"); saveTopBarState(); });
-    showTopBarButton.addEventListener("click", () => { topBarEl.classList.remove("hidden"); showTopBarButton.classList.remove("visible"); saveTopBarState(); });
+
+    async function fetchLeaderboard() {
+      try {
+        const data = await fetchJson("/api/leaderboard");
+        renderLeaderboard(data && data.leaderboard ? data.leaderboard : []);
+      } catch (e) {
+        console.warn("Leaderboard fetch failed:", e);
+        leaderboardListEl.innerHTML = '<div class="leaderboard-empty">Leaderboard unavailable.</div>';
+      }
+    }
+    function renderLeaderboard(entries) {
+      if (!Array.isArray(entries) || entries.length === 0) {
+        leaderboardListEl.innerHTML = '<div class="leaderboard-empty">No players yet.</div>';
+        return;
+      }
+      const ownId = currentPlayerId || (sessionToken ? null : null);
+      const html = entries.map((entry, idx) => {
+        const rank = idx + 1;
+        const playerId = entry.playerId || entry.id || "";
+        const isSelf = ownId && playerId === ownId;
+        const medal = rank === 1 ? "🥇" : rank === 2 ? "🥈" : rank === 3 ? "🥉" : rank;
+        const nodes = typeof entry.nodes === "number" ? entry.nodes : 0;
+        const army = typeof entry.army === "number" ? entry.army : 0;
+        return `<div class="leaderboard-row${isSelf ? " self" : ""}">
+          <div class="leaderboard-rank">${medal}</div>
+          <div class="leaderboard-name" title="${escapeHtml(entry.username || "Unknown")}">${escapeHtml(entry.username || "Unknown")}</div>
+          <div class="leaderboard-score"><strong>${army.toLocaleString()}</strong> army · ${nodes.toLocaleString()} nodes</div>
+        </div>`;
+      }).join("");
+      leaderboardListEl.innerHTML = html;
+    }
+    function escapeHtml(str) {
+      return String(str).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
+    }
+    refreshLeaderboardButton.addEventListener("click", fetchLeaderboard);
 
     async function fetchJson(url, options = {}) {
       const controller = new AbortController();
@@ -2268,15 +2307,10 @@
       const percent = total > 0 ? Math.round((current / total) * 100) : 0;
       const isComplete = String(buildStatus.phase || "") === "complete" || (total > 0 && current >= total);
       const label = `${current.toLocaleString()} / ${total.toLocaleString()}`;
-      loadingMessageEl.textContent = buildStatus.message || "Building nodes...";
-      loadingProgressTextEl.textContent = label;
-      loadingProgressPercentEl.textContent = `${percent}%`;
-      loadingProgressFillEl.classList.remove("indeterminate");
-      loadingProgressFillEl.style.width = `${percent}%`;
-      buildProgressInlineEl.textContent = label;
-      tileProgressFillEl.classList.remove("indeterminate");
-      tileProgressFillEl.style.width = `${percent}%`;
-      previewNodeCountEl.textContent = Number(buildStatus.node_count || 0).toLocaleString();
+      loadingScreenStatusEl.textContent = `${buildStatus.message || "Building nodes..."} (${label})`;
+      loadingScreenProgressEl.classList.remove("indeterminate");
+      loadingScreenProgressEl.style.width = `${percent}%`;
+      setStatus(`Build progress: ${label}`);
       map.getSource("generation-target")?.setData(
         isComplete
           ? emptyFeatureCollection()
@@ -2290,9 +2324,8 @@
     function applyBuildRetryState(error) {
       const retryMs = error.retryAfterMs || NETWORK_RETRY_MS;
       const retryLabel = formatRetryDelay(retryMs);
-      loadingMessageEl.textContent = `Build status unavailable (${error.message}). Retrying in ${retryLabel}.`;
-      loadingProgressFillEl.classList.add("indeterminate");
-      tileProgressFillEl.classList.add("indeterminate");
+      loadingScreenStatusEl.textContent = `Build status unavailable (${error.message}). Retrying in ${retryLabel}.`;
+      loadingScreenProgressEl.classList.add("indeterminate");
       setStatus(`Build polling failed: ${error.message}. Retrying in ${retryLabel}.`);
     }
 
@@ -2355,9 +2388,9 @@
       map.getSource("generation-target").setData({ type: "FeatureCollection", features: generationFeatures });
       const stateLabel = (region.states || []).join(", ");
       document.title = `${region.name} Node Game`;
-      panelTitleEl.textContent = `${region.name} Game`;
+      panelTitleEl.textContent = region.name;
       regionTextEl.textContent = stateLabel;
-      loadingMessageEl.textContent = `Preparing nodes for ${stateLabel}...`;
+      loadingScreenStatusEl.textContent = `Preparing nodes for ${stateLabel}...`;
       if (sessionToken && focusStoredOwnedView()) {
         return;
       }
@@ -2684,6 +2717,7 @@
           ? `Logged in as ${state.player.username}. You own ${ownedFeatures.length} green nodes.`
           : "Register or log in to claim 10 starting nodes.";
         activeAttackCountEl.textContent = (state.attacks?.features || []).length.toLocaleString();
+        fetchLeaderboard();
         if (state.player && ownedFeatures.length) {
           if (!panelAutoHiddenForSession) {
             hideMainPanel(true);
@@ -2775,6 +2809,7 @@
         connectWebSocket();
         await refreshGameState();
         scheduleVisibleTileRefresh(0, true);
+        fetchLeaderboard();
       } catch (error) {
         saveLoginFormState();
         authSummaryEl.textContent = error.message;
@@ -2865,6 +2900,7 @@
       setAttackFeatures([]);
       map.getSource("attack-preview")?.setData(emptyFeatureCollection());
       setStatus(defaultStatusMessage());
+      fetchLeaderboard();
       showMainPanel(true);
       if (activeRegion?.active_region) {
         focusRegion(activeRegion.active_region);
@@ -2958,7 +2994,7 @@
       }
       setSendPerTickValue(DEFAULT_SEND_PER_TICK);
       loadPanelState();
-      loadTopBarState();
+      fetchLeaderboard();
       const storedBuildStatus = loadStoredBuildStatus();
       if (storedBuildStatus) {
         applyBuildStatus(storedBuildStatus);

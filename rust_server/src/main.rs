@@ -1294,6 +1294,82 @@ impl App {
         }))
     }
 
+    fn is_test_or_bot_username(username: &str) -> bool {
+        let lower = username.to_lowercase();
+        if lower.contains("test")
+            || lower.contains("probe")
+            || lower.contains("perf")
+            || lower.contains("dummy")
+            || lower.starts_with("qa_")
+            || lower.contains("loginprobe")
+            || lower.contains("trae_")
+            || lower.chars().all(|c| c.is_ascii_digit())
+        {
+            return true;
+        }
+        let unique: HashSet<char> = lower.chars().collect();
+        username.len() >= 12 && unique.len() <= 4
+    }
+
+    fn leaderboard_response(&self, token: Option<&str>) -> Result<Value, String> {
+        let mut data = self.inner.lock().unwrap();
+        let session = token
+            .map(|token| self.require_session_locked(&data, token))
+            .transpose()?;
+        self.tick_world_locked(&mut data)?;
+        self.sync_world_nodes_locked(&mut data)?;
+        let mut scores = HashMap::<String, (usize, i64)>::new();
+        for node in data.state.nodes.values() {
+            if let Some(owner_id) = node.owner_id.as_ref() {
+                let entry = scores.entry(owner_id.clone()).or_insert((0, 0));
+                entry.0 += 1;
+                entry.1 += node.army.max(0);
+            }
+        }
+        let mut leaderboard = Vec::new();
+        for (player_id, (nodes, army)) in scores {
+            if let Some(player) = data.state.players.get(&player_id) {
+                if Self::is_test_or_bot_username(&player.username) {
+                    continue;
+                }
+                leaderboard.push(json!({
+                    "playerId": player_id,
+                    "username": player.username,
+                    "nodes": nodes,
+                    "army": army,
+                }));
+            }
+        }
+        leaderboard.sort_by(|a, b| {
+            let a_army = a.get("army").and_then(Value::as_i64).unwrap_or(0);
+            let b_army = b.get("army").and_then(Value::as_i64).unwrap_or(0);
+            b_army
+                .cmp(&a_army)
+                .then_with(|| {
+                    let a_nodes = a.get("nodes").and_then(Value::as_u64).unwrap_or(0);
+                    let b_nodes = b.get("nodes").and_then(Value::as_u64).unwrap_or(0);
+                    b_nodes.cmp(&a_nodes)
+                })
+                .then_with(|| {
+                    let a_name = a.get("username").and_then(Value::as_str).unwrap_or("");
+                    let b_name = b.get("username").and_then(Value::as_str).unwrap_or("");
+                    a_name.cmp(b_name)
+                })
+        });
+        leaderboard.truncate(20);
+        let current_player_id = session.as_ref().map(|session| session.player_id.as_str());
+        let current_rank = current_player_id.and_then(|player_id| {
+            leaderboard
+                .iter()
+                .position(|entry| entry.get("playerId").and_then(Value::as_str) == Some(player_id))
+                .map(|index| index + 1)
+        });
+        Ok(json!({
+            "leaderboard": leaderboard,
+            "currentRank": current_rank,
+        }))
+    }
+
     fn node_ids_for_tile_locked(
         &self,
         data: &mut AppData,
@@ -2109,6 +2185,10 @@ fn handle_request(app: &Arc<App>, mut request: Request) {
                 let token = query.get("token").map(String::as_str);
                 let include_nodes = query.get("view").map(String::as_str) != Some("summary");
                 Ok(json_response(200, &app.game_state_response(token, include_nodes)?))
+            }
+            (&Method::Get, "/api/leaderboard") => {
+                let token = query.get("token").map(String::as_str);
+                Ok(json_response(200, &app.leaderboard_response(token)?))
             }
             (&Method::Get, "/api/node-tile") => {
                 let token = query.get("token").map(String::as_str);
