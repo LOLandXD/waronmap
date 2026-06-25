@@ -730,14 +730,13 @@
       connectionTargetsListEl.replaceChildren();
       connectionTargetsHintEl.textContent = `Loading adjacent targets for node ${selectedNodeId}...`;
       try {
-        const candidateNodeIds = connectableCandidateNodeIds();
         const payload = await fetchJson(CONNECTABLE_NODES_URL, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             token: sessionToken,
             fromNodeId: selectedNodeId,
-            nodeIds: candidateNodeIds.length ? candidateNodeIds : [],
+            nodeIds: [],
           }),
         });
         if (requestVersion !== selectedNodeTargetsRequestVersion) {
