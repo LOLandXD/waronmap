@@ -1631,18 +1631,13 @@
       inspectNode(feature);
       selectedNodeId = nodeId;
       selectedNodeFeature = feature;
-      connectPreviewMode = false;
       hoveredAttackKey = null;
       setHoveredPreviewTargetNode(null);
       previewPathCache.clear();
       selectedNodeTextEl.textContent = selectedNodeSummary(feature);
       setSendPerTickValue(findAttackFeature(nodeId, inspectedNodeId)?.properties?.sendPerTick || sendPerTickInput.value);
       clearPreviewLine();
-      clearConnectableTargets();
-      setStatus(statusMessage || `Selected node ${nodeId}.`);
-      void refreshSelectedNodeTargets();
-      updateRouteControls(feature);
-      updateSelectionStatus();
+      enterConnectMode(statusMessage || `Selected node ${nodeId}. Click an adjacent node.`);
     }
 
     function defaultStatusMessage() {
@@ -1844,7 +1839,7 @@
         return false;
       }
       connectPreviewMode = true;
-      scheduleConnectableTargetsRefresh(0);
+      void refreshSelectedNodeTargets();
       if (String(inspectedNodeId || "") === String(selectedNodeId || "")) {
         updateNodeInfo(selectedNodeFeature);
       }
