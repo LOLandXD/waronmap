@@ -886,6 +886,11 @@
             ? `Transfer started at ${formatTickRate(sendPerTick)}.`
             : `Attack started at ${formatTickRate(sendPerTick)}.`);
         }
+        connectPreviewMode = false;
+        clearConnectableTargets();
+        clearPreviewLine();
+        updateSelectionStatus();
+        updateRouteControls(renderedNodeFeatures.find((feature) => String(feature?.properties?.id || "") === inspectedNodeId) || selectedNodeFeature);
         renderSelectedNodeTargets();
         updateNodeInfo(renderedNodeFeatures.find((feature) => String(feature?.properties?.id || "") === inspectedNodeId) || null);
         void refreshGameState();
