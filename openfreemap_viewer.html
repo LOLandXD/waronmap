@@ -2745,7 +2745,13 @@
         return;
       }
       renderedNodeFeatureMap = nextMap;
-      const displayFeatures = spreadOverlappingNodeFeatures(features);
+      const displayFeatures = spreadOverlappingNodeFeatures(features).map((feature) => {
+        const props = feature.properties || {};
+        if (props.ownerState && props.ownerState !== "neutral" && !props.ownerColor) {
+          props.ownerColor = props.ownerState === "self" ? "#22c55e" : "#8b5cf6";
+        }
+        return feature;
+      });
       renderedNodeFeatures = displayFeatures;
       syncInspectedNodeFromRenderedFeatures(displayFeatures);
       syncSelectionFromRenderedFeatures(displayFeatures);
@@ -3228,7 +3234,7 @@
       map.addLayer({ id: "query-blocks-fill", type: "fill", source: "query-blocks", paint: { "fill-color": "#22c55e", "fill-opacity": ["case", ["boolean", ["get", "completed"], false], 0.25, 0.0] }, maxzoom: 10 });
       map.addLayer({ id: "query-blocks-line", type: "line", source: "query-blocks", paint: { "line-color": "#16a34a", "line-width": ["case", ["boolean", ["get", "completed"], false], 1.1, 0.0] }, maxzoom: 10 });
       map.addLayer({ id: "connectable-node-rings", type: "circle", source: "connectable-nodes", minzoom: NODE_MIN_ZOOM, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], NODE_MIN_ZOOM, 12, 13, 15, 16, 18], "circle-color": "rgba(0,0,0,0)", "circle-stroke-color": "rgba(0,0,0,0)", "circle-stroke-width": 0, "circle-opacity": 0 } });
-      map.addLayer({ id: "game-node-circles", type: "circle", source: "game-nodes", minzoom: NODE_MIN_ZOOM, layout: { "circle-sort-key": ["get", "army"] }, paint: { "circle-color": ["case", ["==", ["get", "ownerState"], "neutral"], "#e2e8f0", ["coalesce", ["get", "ownerColor"], ["case", ["==", ["get", "ownerState"], "self"], "#22c55e", "#8b5cf6"]]], "circle-radius": ["interpolate", ["linear"], ["zoom"], NODE_MIN_ZOOM, 10.5, 13, 13.5, 16, 17.5], "circle-stroke-color": "#000000", "circle-stroke-width": 1.5, "circle-opacity": 0.96 } });
+      map.addLayer({ id: "game-node-circles", type: "circle", source: "game-nodes", minzoom: NODE_MIN_ZOOM, layout: { "circle-sort-key": ["get", "army"] }, paint: { "circle-color": ["case", ["==", ["get", "ownerState"], "neutral"], "#e2e8f0", ["get", "ownerColor"]], "circle-radius": ["interpolate", ["linear"], ["zoom"], NODE_MIN_ZOOM, 10.5, 13, 13.5, 16, 17.5], "circle-stroke-color": "#000000", "circle-stroke-width": 1.5, "circle-opacity": 0.96 } });
       map.addLayer({ id: "self-node-ring", type: "circle", source: "game-nodes", minzoom: NODE_MIN_ZOOM, filter: ["==", ["get", "ownerState"], "self"], paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], NODE_MIN_ZOOM, 13, 13, 17, 16, 21], "circle-color": "rgba(0,0,0,0)", "circle-stroke-color": "#22c55e", "circle-stroke-width": 2.2, "circle-opacity": 0.85 } });
       map.addLayer({ id: "selected-node-ring", type: "circle", source: "selected-node", minzoom: NODE_MIN_ZOOM, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], NODE_MIN_ZOOM, 16, 13, 20, 16, 25], "circle-color": "rgba(0,0,0,0)", "circle-stroke-color": "#facc15", "circle-stroke-width": 3.2, "circle-opacity": 1 } });
       map.addLayer({ id: "hover-node-ring", type: "circle", source: "hover-node", minzoom: NODE_MIN_ZOOM, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], NODE_MIN_ZOOM, 15.5, 13, 19.5, 16, 24], "circle-color": "rgba(250, 204, 21, 0.18)", "circle-stroke-color": "#facc15", "circle-stroke-width": 4.2, "circle-opacity": 1 } });
