@@ -1424,7 +1424,9 @@
         const offsetX = padding + (availW - drawW) / 2;
         const offsetY = padding + (availH - drawH) / 2;
         const nodeSize = 2;
-        for (const feature of renderedNodeFeatures) {
+        const downsample = renderedNodeFeatures.length > 6000 ? 2 : 1;
+        for (let i = 0; i < renderedNodeFeatures.length; i += downsample) {
+          const feature = renderedNodeFeatures[i];
           const coords = feature.geometry?.coordinates;
           if (!Array.isArray(coords) || coords.length < 2) continue;
           const x = Math.floor(offsetX + (coords[0] - bounds.west) * scale);
