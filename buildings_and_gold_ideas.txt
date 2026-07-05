@@ -1,0 +1,75 @@
+Buildings & Gold System Ideas for WarOnMap
+============================================
+
+BUILDINGS (built on owned nodes, cost gold + army + time)
+----------------------------------------------------------
+
+Barracks
+  - Node produces +2 army/tick instead of +1 (or a flat multiplier).
+
+Fort / Bunker
+  - Defending army takes reduced losses; attackers must overcome a defense bonus.
+
+Factory
+  - Generates a small amount of gold per tick.
+
+Mine
+  - Generates more gold but consumes some army upkeep each tick.
+
+Watchtower
+  - Reveals adjacent enemy nodes, including their exact army count and owner.
+
+Supply Depot
+  - Transfers FROM this node send more troops per tick.
+
+Road Hub
+  - Connections TO this node move troops faster (lower travel time).
+
+Wall
+  - Enemy attacks against this node have reduced flow until the wall is breached.
+
+Bank / Vault
+  - Raises empire gold cap and protects some gold from capture.
+
+Capitol
+  - Unique per player; gives an empire-wide buff (e.g., +10% gold or +1 army/tick to all nodes).
+
+Airfield / Harbor
+  - Lets you launch one long-range attack per tick to a non-adjacent node.
+
+Research Lab
+  - Unlocks tech tiers over time (faster ticks, cheaper buildings, stronger forts).
+
+
+GOLD SYSTEM IDEAS
+-----------------
+
+Passive Tax
+  - Every owned node generates a baseline gold per tick; higher-degree / city nodes give more.
+
+Capture Bounty
+  - Taking a node gives a one-time gold reward; capturing from a player gives extra.
+
+Loot
+  - When you capture an enemy node, steal a percentage of their gold stockpile.
+
+Building Cost
+  - Buildings cost gold plus a small army investment and take several ticks to finish.
+
+Reinforcement Rush
+  - Spend gold to instantly add armies to a node during a defense.
+
+Gold Cap
+  - Each node can only hold so much gold, encouraging you to build banks or expand.
+
+Trade Routes
+  - A continuous connection between two of your cities generates bonus gold per tick.
+
+Upkeep
+  - Powerful buildings consume gold each tick; if you go broke, they deactivate.
+
+Market / Trader
+  - Spend gold to temporarily boost transfer rate or buy a neutral-node claim.
+
+Prestige Reset
+  - Late-game, spend a large pile of gold to prestige, gaining a permanent empire bonus and reshuffling the map.

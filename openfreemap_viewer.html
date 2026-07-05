@@ -945,6 +945,7 @@
         renderSelectedNodeTargets();
         updateNodeInfo(renderedNodeFeatures.find((feature) => String(feature?.properties?.id || "") === inspectedNodeId) || null);
         void refreshGameState();
+        scheduleVisibleTileRefresh(0, true);
       } catch (error) {
         if (localFeature) {
           removeLocalAttackFeature(selectedNodeId, targetNodeId);
@@ -1968,7 +1969,17 @@
         linkDragSnapPoint = { x: projected.x, y: projected.y };
         map.getCanvas().style.cursor = "copy";
         updateHoveredNodeHighlight(targetFeature);
-        setStatus(`Release to link node ${linkDragState.fromNodeId} -> ${targetId}.`);
+        const sourceArmy = Math.max(0, Number(linkDragState.fromFeature?.properties?.army || 0));
+        const targetArmy = Math.max(0, Number(targetFeature.properties?.army || 0));
+        const configuredRate = normalizeSendPerTick(sendPerTickInput.value);
+        const effectiveRate = Math.min(configuredRate, sourceArmy);
+        const mode = isPersonalMovement(targetFeature) ? "transfer" : "attack";
+        let preview = `Release to link ${linkDragState.fromNodeId} -> ${targetId}: ${mode} ${effectiveRate.toLocaleString()}/tick vs ${targetArmy.toLocaleString()} army.`;
+        if (mode === "attack" && effectiveRate > 0) {
+          const ticks = Math.floor(targetArmy / effectiveRate) + 1;
+          preview += ` ~${ticks.toLocaleString()} tick${ticks === 1 ? "" : "s"} to capture.`;
+        }
+        setStatus(preview);
       } else {
         linkDragSnapTarget = null;
         linkDragSnapPoint = { x: 0, y: 0 };
@@ -2358,6 +2369,34 @@
             const previewFeature = { properties: { mode: previewMode, ownerState: "self" } };
             const linkColor = connectionLineColor(previewFeature, 1);
             drawConnectionPath(linkCoords, linkColor, zoomWidth, [DASH_LEN, GAP_LEN], 0, "butt");
+            if (targetFeature && linkDragSnapTarget) {
+              const sourceArmy = Math.max(0, Number(linkDragState.fromFeature?.properties?.army || 0));
+              const targetArmy = Math.max(0, Number(targetFeature.properties?.army || 0));
+              const configuredRate = normalizeSendPerTick(sendPerTickInput.value);
+              const effectiveRate = Math.min(configuredRate, sourceArmy);
+              const labelLines = [`${effectiveRate.toLocaleString()}/tick vs ${targetArmy.toLocaleString()}`];
+              if (previewMode === "attack" && effectiveRate > 0) {
+                const ticks = Math.floor(targetArmy / effectiveRate) + 1;
+                labelLines.push(`~${ticks.toLocaleString()} tick${ticks === 1 ? "" : "s"} to capture`);
+              }
+              const ctx = connectionCanvasContext;
+              const labelX = linkDragSnapPoint.x + 14;
+              const labelY = linkDragSnapPoint.y - 14;
+              ctx.font = "bold 12px system-ui, -apple-system, sans-serif";
+              ctx.textAlign = "left";
+              ctx.textBaseline = "bottom";
+              const lineHeight = 14;
+              const maxWidth = Math.max(...labelLines.map((line) => ctx.measureText(line).width));
+              const padding = 4;
+              ctx.fillStyle = "rgba(0, 0, 0, 0.75)";
+              ctx.beginPath();
+              ctx.roundRect(labelX - padding, labelY - labelLines.length * lineHeight - padding, maxWidth + padding * 2, labelLines.length * lineHeight + padding * 2, 4);
+              ctx.fill();
+              ctx.fillStyle = "#ffffff";
+              for (let index = 0; index < labelLines.length; index += 1) {
+                ctx.fillText(labelLines[index], labelX, labelY - (labelLines.length - 1 - index) * lineHeight);
+              }
+            }
           }
         }
       }
