@@ -117,6 +117,7 @@ struct NodeRepo {
     s2_sorted_nodes: Vec<(u64, String)>,
     s2_cell_ranges: HashMap<u64, (usize, usize)>,
     s2_index_level: u64,
+    display_names: HashMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -244,6 +245,7 @@ struct App {
     cache_dir: PathBuf,
     region_manifest_path: PathBuf,
     state_boundaries_path: PathBuf,
+    display_names_path: PathBuf,
     inner: Mutex<AppData>,
     ws_update_sender: crossbeam_channel::Sender<String>,
 }
@@ -275,6 +277,10 @@ impl App {
                 .join("_overpass_cache"),
             region_manifest_path: root.join("local_node_store").join("region_manifest.json"),
             state_boundaries_path: root.join("local_node_store").join("us_state_boundaries.geojson"),
+            display_names_path: root
+                .join("local_node_store")
+                .join("northern_new_england")
+                .join("node_display_names.json"),
             inner: Mutex::new(AppData {
                 state,
                 node_repo: NodeRepo::default(),
@@ -520,6 +526,7 @@ impl App {
         data.node_repo.s2_sorted_nodes.clear();
         data.node_repo.s2_cell_ranges.clear();
         data.node_repo.s2_index_level = 12;
+        data.node_repo.display_names.clear();
 
         if self.preview_path.exists() {
             let preview = read_json_file::<GenericCollection>(&self.preview_path)
@@ -668,6 +675,12 @@ impl App {
                     }
                 }
             }
+        }
+
+        if self.display_names_path.exists() {
+            let names = read_json_file::<HashMap<String, String>>(&self.display_names_path)
+                .unwrap_or_default();
+            data.node_repo.display_names = names;
         }
 
         data.node_repo.preview_mtime_ms = node_source_mtime_ms;
@@ -1266,10 +1279,17 @@ impl App {
             .and_then(|owner_id| data.state.players.get(owner_id));
         let owner_username = owner.map(|player| player.username.clone());
         let owner_color = owner.map(|player| player.color.clone());
+        let display_name = data
+            .node_repo
+            .display_names
+            .get(node_id)
+            .cloned()
+            .unwrap_or_else(|| format!("Node {}", node_id));
         Some(json!({
             "type": "Feature",
             "properties": {
                 "id": node_id,
+                "displayName": display_name,
                 "latitude": repo_node.lat,
                 "longitude": repo_node.lon,
                 "degree": repo_node.degree,
