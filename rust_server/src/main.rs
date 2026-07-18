@@ -1906,6 +1906,15 @@ impl App {
             (Some(_), _) => "enemy",
             _ => "neutral",
         };
+        let production_rate = if owner_state == "self" {
+            world_node
+                .owner_id
+                .as_deref()
+                .map(|pid| self.node_army_production_rate_locked(data, node_id, pid))
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
         let owner = world_node
             .owner_id
             .as_deref()
@@ -1933,6 +1942,7 @@ impl App {
                 "ownerColor": owner_color,
                 "ownerState": owner_state,
                 "building": world_node.building.as_ref().map(|b| b.to_label()),
+                "productionRate": production_rate,
                 "canAttack": player_id.map(|id| world_node.owner_id.as_deref() != Some(id)).unwrap_or(false)
             },
             "geometry": {
