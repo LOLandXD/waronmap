@@ -1,3 +1,4 @@
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use futures_util::{SinkExt, StreamExt};
 use geo::{Coord as GeoCoord, LineString, Simplify};
 use rand::random;
@@ -10,10 +11,11 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use subtle::ConstantTimeEq;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use url::form_urlencoded;
 
@@ -213,6 +215,8 @@ struct Session {
     token: String,
     player_id: String,
     created_at: i64,
+    #[serde(default)]
+    expires_at: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1348,12 +1352,17 @@ impl App {
     }
 
     fn require_session_locked(&self, data: &AppData, token: &str) -> Result<Session, String> {
-        data.state
+        let session = data
+            .state
             .sessions
             .get(token)
             .cloned()
             .filter(|session| data.state.players.contains_key(&session.player_id))
-            .ok_or_else(|| "Invalid session.".to_string())
+            .ok_or_else(|| "Invalid session.".to_string())?;
+        if session.expires_at <= now_ms() {
+            return Err("Session expired. Please log in again.".to_string());
+        }
+        Ok(session)
     }
 
     fn reconstruct_node_id_path(
@@ -1493,7 +1502,7 @@ impl App {
             Player {
                 id: player_id.clone(),
                 username: normalized.clone(),
-                password_hash: sha256_hex(password),
+                password_hash: hash_password_argon2(password)?,
                 created_at: now,
                 start_node_ids: start_nodes.clone(),
                 color: normalize_player_color(color),
@@ -1513,7 +1522,8 @@ impl App {
             Session {
                 token: session_token.clone(),
                 player_id: player_id.clone(),
-                created_at: now_ms(),
+                created_at: now,
+                expires_at: now + 7 * 24 * 60 * 60 * 1000,
             },
         );
         self.save_state_locked(&mut data.state)?;
@@ -1535,20 +1545,35 @@ impl App {
             .get(&player_id)
             .cloned()
             .ok_or_else(|| "Invalid username or password.".to_string())?;
-        if player.password_hash != sha256_hex(password) {
+        let (verified, is_old_hash) = verify_password(password, &player.password_hash)?;
+        if !verified {
             return Err("Invalid username or password.".to_string());
         }
         let session_token = random_id("session");
+        let now = now_ms();
         data.state.sessions.insert(
             session_token.clone(),
             Session {
                 token: session_token.clone(),
                 player_id: player_id.clone(),
-                created_at: now_ms(),
+                created_at: now,
+                expires_at: now + 7 * 24 * 60 * 60 * 1000,
             },
         );
+        if is_old_hash {
+            if let Some(player_ref) = data.state.players.get_mut(&player_id) {
+                player_ref.password_hash = hash_password_argon2(password)?;
+            }
+        }
         self.save_state_locked(&mut data.state)?;
         Ok(json!({ "playerId": player_id, "token": session_token }))
+    }
+
+    fn logout_player(&self, token: &str) -> Result<Value, String> {
+        let mut data = self.inner.lock().unwrap();
+        data.state.sessions.remove(token);
+        self.save_state_locked(&mut data.state)?;
+        Ok(json!({ "ok": true }))
     }
 
     fn step_world_locked(&self, data: &mut AppData) -> Result<(), String> {
@@ -2169,16 +2194,14 @@ impl App {
 
     fn node_tile_response(
         &self,
-        token: Option<&str>,
+        token: &str,
         z: i64,
         x: i64,
         y: i64,
     ) -> Result<Value, String> {
         let mut data = self.inner.lock().unwrap();
-        let session = token
-            .map(|token| self.require_session_locked(&data, token))
-            .transpose()?;
-        let player_id = session.as_ref().map(|session| session.player_id.as_str());
+        let session = self.require_session_locked(&data, token)?;
+        let player_id = Some(session.player_id.as_str());
         let node_ids = self.node_ids_for_tile_locked(&mut data, z, x, y)?;
         let features = node_ids
             .iter()
@@ -2399,12 +2422,13 @@ impl App {
     }
 
     fn serve_static(&self, pathname: &str) -> Response<std::io::Cursor<Vec<u8>>> {
-        let relative = if pathname == "/" {
-            PathBuf::from("openfreemap_viewer.html")
-        } else if let Some(path) = safe_relative_path(pathname) {
-            path
-        } else {
-            return error_json_response(403, &json!({ "error": "Forbidden." }));
+        let relative = match pathname {
+            "/" => PathBuf::from("openfreemap_viewer.html"),
+            "/openfreemap_viewer.html" => PathBuf::from("openfreemap_viewer.html"),
+            "/sw.js" => PathBuf::from("sw.js"),
+            "/vendor/maplibre-gl.js" => PathBuf::from("vendor/maplibre-gl.js"),
+            "/vendor/maplibre-gl.css" => PathBuf::from("vendor/maplibre-gl.css"),
+            _ => return error_json_response(404, &json!({ "error": "Not found." })),
         };
         let file_path = self.root.join(relative);
         match fs::read(&file_path) {
@@ -2475,6 +2499,34 @@ fn sha256_hex(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+fn hash_password_argon2(password: &str) -> Result<String, String> {
+    use argon2::password_hash::{rand_core::OsRng, SaltString};
+    let argon2 = Argon2::default();
+    let salt = SaltString::generate(&mut OsRng);
+    argon2
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|err| err.to_string())
+}
+
+fn verify_password(password: &str, hash: &str) -> Result<(bool, bool), String> {
+    if hash.starts_with("$argon2") {
+        let parsed_hash = match PasswordHash::new(hash) {
+            Ok(hash) => hash,
+            Err(_) => return Ok((false, false)),
+        };
+        match Argon2::default().verify_password(password.as_bytes(), &parsed_hash) {
+            Ok(()) => Ok((true, false)),
+            Err(_) => Ok((false, false)),
+        }
+    } else {
+        let expected = sha256_hex(password);
+        let verified = expected.len() == hash.len()
+            && expected.as_bytes().ct_eq(hash.as_bytes()).into();
+        Ok((verified, true))
+    }
 }
 
 fn haversine_km(a_lat: f64, a_lon: f64, b_lat: f64, b_lon: f64) -> f64 {
@@ -2934,18 +2986,6 @@ fn content_type(file_path: &Path) -> &'static str {
     }
 }
 
-fn safe_relative_path(pathname: &str) -> Option<PathBuf> {
-    let mut out = PathBuf::new();
-    for component in Path::new(pathname.trim_start_matches('/')).components() {
-        match component {
-            Component::Normal(value) => out.push(value),
-            Component::CurDir => {}
-            _ => return None,
-        }
-    }
-    Some(out)
-}
-
 fn parse_url(url: &str) -> (String, HashMap<String, String>) {
     let mut parts = url.splitn(2, '?');
     let pathname = parts.next().unwrap_or("/").to_string();
@@ -2954,6 +2994,16 @@ fn parse_url(url: &str) -> (String, HashMap<String, String>) {
         .into_owned()
         .collect::<HashMap<_, _>>();
     (pathname, params)
+}
+
+fn extract_bearer_token(request: &Request) -> Option<String> {
+    request
+        .headers()
+        .iter()
+        .find(|header| header.field.as_str().to_string().eq_ignore_ascii_case("Authorization"))
+        .and_then(|header| std::str::from_utf8(header.value.as_bytes()).ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(|token| token.trim().to_string())
 }
 
 fn handle_request(app: &Arc<App>, mut request: Request) {
@@ -2975,16 +3025,18 @@ fn handle_request(app: &Arc<App>, mut request: Request) {
                 Ok(json_response(200, &app.login_player(username, password)?))
             }
             (&Method::Get, "/api/game-state") => {
-                let token = query.get("token").map(String::as_str);
+                let token = extract_bearer_token(&request)
+                    .or_else(|| query.get("token").cloned());
                 let include_nodes = query.get("view").map(String::as_str) != Some("summary");
-                Ok(json_response(200, &app.game_state_response(token, include_nodes)?))
+                Ok(json_response(200, &app.game_state_response(token.as_deref(), include_nodes)?))
             }
             (&Method::Get, "/api/leaderboard") => {
-                let token = query.get("token").map(String::as_str);
-                Ok(json_response(200, &app.leaderboard_response(token)?))
+                let token = extract_bearer_token(&request);
+                Ok(json_response(200, &app.leaderboard_response(token.as_deref())?))
             }
             (&Method::Get, "/api/node-tile") => {
-                let token = query.get("token").map(String::as_str);
+                let token = extract_bearer_token(&request)
+                    .ok_or_else(|| "Invalid session.".to_string())?;
                 let z = query
                     .get("z")
                     .and_then(|value| value.parse::<i64>().ok())
@@ -2997,7 +3049,14 @@ fn handle_request(app: &Arc<App>, mut request: Request) {
                     .get("y")
                     .and_then(|value| value.parse::<i64>().ok())
                     .ok_or_else(|| "z, x, and y are required.".to_string())?;
-                Ok(json_response(200, &app.node_tile_response(token, z, x, y)?))
+                Ok(json_response(200, &app.node_tile_response(&token, z, x, y)?))
+            }
+            (&Method::Post, "/api/logout") => {
+                let token = extract_bearer_token(&request).or_else(|| {
+                    let body = parse_body_json(&mut request).ok()?;
+                    body.get("token").and_then(Value::as_str).map(String::from)
+                }).ok_or_else(|| "Invalid session.".to_string())?;
+                Ok(json_response(200, &app.logout_player(&token)?))
             }
             (&Method::Post, "/api/attack") => {
                 let body = parse_body_json(&mut request)?;

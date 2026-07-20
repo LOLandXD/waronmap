@@ -243,7 +243,6 @@
     <div id="startNodeAction" class="route-controls hidden">
       <div id="startNodeHint" class="hint">Choose this node as the center of your starting territory.</div>
       <div class="actions">
-        <button id="setStartNodeButton" type="button">Start Here</button>
         <button id="clearStartNodeButton" type="button" class="secondary">Clear</button>
       </div>
     </div>
@@ -412,7 +411,6 @@
     const buildingEffectsListEl = document.getElementById("buildingEffectsList");
     const startNodeActionEl = document.getElementById("startNodeAction");
     const startNodeHintEl = document.getElementById("startNodeHint");
-    const setStartNodeButton = document.getElementById("setStartNodeButton");
     const clearStartNodeButton = document.getElementById("clearStartNodeButton");
 
     let activeRegion = null;
@@ -1316,7 +1314,6 @@
       try {
         localStorage.setItem(LOGIN_FORM_KEY, JSON.stringify({
           username: usernameInput.value || "",
-          password: passwordInput.value || "",
         }));
       } catch {}
     }
@@ -1328,7 +1325,6 @@
         }
         const saved = JSON.parse(raw);
         usernameInput.value = typeof saved?.username === "string" ? saved.username : "";
-        passwordInput.value = typeof saved?.password === "string" ? saved.password : "";
       } catch {}
     }
     function hideMainPanel(persist = true) {
@@ -1485,6 +1481,12 @@
       try {
         const requestOptions = { ...options };
         delete requestOptions.signal;
+        if (sessionToken) {
+          requestOptions.headers = {
+            ...(requestOptions.headers || {}),
+            "Authorization": `Bearer ${sessionToken}`,
+          };
+        }
         const response = await fetch(url, {
           ...requestOptions,
           signal: controller.signal,
@@ -1835,12 +1837,10 @@
       const nodeId = String(feature.properties?.id || "");
       if (ownerState !== "neutral") {
         startNodeHintEl.textContent = "This node is already owned. Choose a neutral (white/gray) node to start.";
-        setStartNodeButton.disabled = true;
       } else {
         startNodeHintEl.textContent = selectedStartNodeId === nodeId
           ? "This node is selected as your starting location."
-          : "Click the button to make this the center of your starting territory.";
-        setStartNodeButton.disabled = false;
+          : "Click a neutral node to choose your starting location.";
       }
       clearStartNodeButton.classList.toggle("hidden", !selectedStartNodeId);
       startNodeActionEl.classList.remove("hidden");
@@ -2806,7 +2806,11 @@
       const nodeId = String(props.id);
       if (!sessionToken) {
         inspectNode(feature);
-        updateStartNodeAction(feature);
+        if (props.ownerState === "neutral") {
+          selectStartNode(feature);
+        } else {
+          updateStartNodeAction(feature);
+        }
         return;
       }
       if (selectedNodeId === nodeId) {
@@ -2962,7 +2966,6 @@
       const requestAbortController = new AbortController();
       activeVisibleTileAbortController = requestAbortController;
       activeVisibleTileRequestKey = requestKey;
-      const suffix = sessionToken ? `&token=${encodeURIComponent(sessionToken)}` : "";
       const features = [];
       const seen = new Set();
       const addPayload = (payload) => {
@@ -2999,7 +3002,7 @@
             return cachedPayload;
           }
         }
-        const payload = await fetchJson(`${NODE_TILE_URL}?v=2&z=${z}&x=${x}&y=${y}${suffix}`, {
+        const payload = await fetchJson(`${NODE_TILE_URL}?v=2&z=${z}&x=${x}&y=${y}`, {
           cache: "no-store",
           signal: requestAbortController.signal,
         });
@@ -3068,6 +3071,8 @@
         wsConnection.addEventListener("open", () => {
           wsReconnectAttempts = 0;
           wsConnection.send(JSON.stringify({ type: "auth", token: sessionToken }));
+          void refreshGameState();
+          scheduleVisibleTileRefresh(100, false);
         });
         wsConnection.addEventListener("message", (event) => {
           wsMessageCount += 1;
@@ -3216,7 +3221,9 @@
         nextGamePollDelayMs = error.retryable ? (error.retryAfterMs || NETWORK_RETRY_MS) : GAME_POLL_MS;
         setStatus(`Game polling failed: ${error.message}. Retrying in ${formatRetryDelay(nextGamePollDelayMs)}.`);
       } finally {
-        gamePollTimer = window.setTimeout(gamePollLoop, nextGamePollDelayMs);
+        if (!wsConnection || wsConnection.readyState !== WebSocket.OPEN) {
+          gamePollTimer = window.setTimeout(gamePollLoop, nextGamePollDelayMs);
+        }
       }
     }
 
@@ -3266,13 +3273,8 @@
 
     registerButton.addEventListener("click", () => submitAuth(REGISTER_URL));
     loginButton.addEventListener("click", () => submitAuth(LOGIN_URL));
-    setStartNodeButton.addEventListener("click", () => {
-      const feature = renderedNodeFeatures.find((f) => String(f.properties?.id || "") === (inspectedNodeId || "")) || null;
-      if (feature) selectStartNode(feature);
-    });
     clearStartNodeButton.addEventListener("click", clearStartNode);
     usernameInput.addEventListener("input", saveLoginFormState);
-    passwordInput.addEventListener("input", saveLoginFormState);
     sendPerTickInput.addEventListener("change", () => {
       setSendPerTickValue(sendPerTickInput.value);
       updateRouteControls(renderedNodeFeatures.find((feature) => String(feature.properties?.id || "") === inspectedNodeId) || null);
@@ -3312,9 +3314,9 @@
       focusOwnedNodes(lastOwnedFeatures, true);
       showToast("Centered on your green nodes.", "success");
     });
-    logoutButton.addEventListener("click", () => {
+    logoutButton.addEventListener("click", async () => {
+      const tokenForLogout = sessionToken;
       disconnectWebSocket();
-      sessionToken = "";
       currentPlayerId = null;
       autoFocusedPlayerId = null;
       panelAutoHiddenForSession = false;
@@ -3334,6 +3336,14 @@
       setAttackFeatures([]);
       setStatus(defaultStatusMessage());
       showToast("Logged out.", "info");
+      if (tokenForLogout) {
+        try {
+          await fetchJson("/api/logout", { method: "POST" });
+        } catch (error) {
+          console.warn("Logout request failed:", error);
+        }
+      }
+      sessionToken = "";
       fetchLeaderboard();
       showMainPanel(true);
       if (activeRegion?.active_region) {
