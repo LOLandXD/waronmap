@@ -34,6 +34,7 @@
     .route-controls .actions { margin-top: 8px; }
     .route-list { margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(148, 163, 184, 0.14); }
     .route-list.hidden { display: none; }
+    #buildControls, #siloControls { display: none !important; }
     .route-list-title { margin-bottom: 8px; color: #e2e8f0; font-size: 13px; font-weight: 700; }
     .route-row { display: grid; gap: 6px; padding: 8px 0; border-top: 1px solid rgba(148, 163, 184, 0.12); }
     .route-row:first-child { border-top: 0; padding-top: 0; }
@@ -153,8 +154,8 @@
           <div class="stat"><span>Rendered nodes</span><strong id="renderedNodeCount">0</strong></div>
           <div class="stat"><span>Active attacks</span><strong id="activeAttackCount">0</strong></div>
           <div class="stat"><span>Selected node</span><strong id="selectedNodeText">None</strong></div>
-          <div class="stat"><span>Gold</span><strong id="goldText">0</strong></div>
-          <div class="stat"><span>Income / sec</span><strong id="incomeText">0</strong></div>
+          <div id="goldStat" class="stat" style="display: none;"><span>Gold</span><strong id="goldText">0</strong></div>
+          <div id="incomeStat" class="stat" style="display: none;"><span>Income / sec</span><strong id="incomeText">0</strong></div>
         </div>
       </div>
       <div class="section">
@@ -173,13 +174,13 @@
         </div>
         <div id="missileStatus" class="status"></div>
       </div>
-      <div class="section">
+      <div id="buildingEffectsSection" class="section" style="display: none;">
         <div class="section-title">🏗 Building Effects</div>
         <div id="buildingEffectsList" class="hint" style="display: grid; gap: 6px; line-height: 1.4;">
           Loading...
         </div>
       </div>
-      <div class="section">
+      <div id="mapOverlaysSection" class="section" style="display: none;">
         <div class="section-title">🗺 Map Overlays</div>
         <div class="hint" style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px;">
           <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;"><input id="toggleCityBorders" type="checkbox" checked> City borders</label>
@@ -206,7 +207,7 @@
       <div class="stat"><span>Army</span><strong id="nodeInfoArmy">0</strong></div>
       <div class="stat"><span>Net per 1s tick</span><strong id="nodeInfoDelta">0</strong></div>
       <div class="stat"><span>Position</span><strong id="nodeInfoPosition">-</strong></div>
-      <div class="stat"><span>Building</span><strong id="nodeInfoBuilding">None</strong></div>
+      <div id="nodeInfoBuildingStat" class="stat" style="display: none;"><span>Building</span><strong id="nodeInfoBuilding">None</strong></div>
     </div>
     <div id="siloControls" class="route-controls hidden">
       <div class="route-list-title">🚀 Launch from this Silo</div>

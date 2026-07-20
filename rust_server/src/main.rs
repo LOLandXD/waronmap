@@ -3023,21 +3023,7 @@ fn handle_request(app: &Arc<App>, mut request: Request) {
                 ))
             }
             (&Method::Post, "/api/build") => {
-                let body = parse_body_json(&mut request)?;
-                let token = body
-                    .get("token")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "Invalid session.".to_string())?;
-                let node_id = body
-                    .get("nodeId")
-                    .and_then(value_to_string)
-                    .ok_or_else(|| "Invalid node.".to_string())?;
-                let building = body
-                    .get("building")
-                    .and_then(Value::as_str)
-                    .and_then(BuildingType::from_str)
-                    .ok_or_else(|| "Invalid building.".to_string())?;
-                Ok(json_response(200, &app.build_building_request(token, &node_id, building)?))
+                Ok(json_response(404, &json!({"error": "building system disabled"})))
             }
             (&Method::Post, "/api/launch-missile") => {
                 let body = parse_body_json(&mut request)?;
