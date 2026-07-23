@@ -8,11 +8,11 @@ use s2::rect::Rect as S2Rect;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
@@ -21,6 +21,7 @@ use url::form_urlencoded;
 
 const WORLD_TICK_MS: u64 = 1000;
 const MAX_CATCH_UP_TICKS: usize = 60; // Avoid freezing after the server has been offline for a while.
+const MAX_HTTP_WORKERS: usize = 64; // Cap in-flight request handler threads.
 const REPO_REFRESH_MS: i64 = 10_000;
 const ARMY_CAP: i64 = 1_000_000;
 const CITY_RADIUS_KM: f64 = 2.0;
@@ -41,6 +42,10 @@ const MISSILE_HYDROGEN_RADIUS_KM: f64 = 3.0;
 const SILO_COOLDOWN_MS: i64 = 10 * 60 * 1000;
 const SAM_COOLDOWN_MS: i64 = 12 * 60 * 1000;
 const SAM_RADIUS_KM: f64 = 5.0;
+// Master switch for the buildings/gold-spend/missile feature set. While false,
+// /api/build and /api/launch-missile are gated off; gold still accrues so the
+// feature can be re-enabled without a state migration.
+const BUILDINGS_ENABLED: bool = false;
 const PLAYER_COLORS: &[&str] = &[
     "#c81c1c", "#c8391c", "#c8561c", "#c8721c", "#c88f1c", "#c8ac1c", "#c8c81c", "#acc81c",
     "#8fc81c", "#72c81c", "#56c81c", "#39c81c", "#1cc81c", "#1cc839", "#1cc856", "#1cc872",
@@ -98,6 +103,8 @@ struct BoundaryRepo {
     refreshed_at: i64,
     signature: String,
     features: Vec<BoundaryFeature>,
+    // Union of all feature bboxes; used to cheaply reject off-region tiles.
+    overall_bbox: Option<BBox>,
 }
 
 #[derive(Clone)]
@@ -119,6 +126,33 @@ struct Coord {
 struct Edge {
     to: String,
     weight: f64,
+}
+
+// Min-heap entry for pathfinding open lists. BinaryHeap is max-first, so the
+// ordering is reversed to pop the lowest score first.
+struct OpenNode {
+    node_id: String,
+    score: f64,
+}
+
+impl PartialEq for OpenNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.score.total_cmp(&other.score).is_eq()
+    }
+}
+
+impl Eq for OpenNode {}
+
+impl PartialOrd for OpenNode {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OpenNode {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other.score.total_cmp(&self.score)
+    }
 }
 
 #[derive(Default)]
@@ -203,10 +237,6 @@ struct Player {
     damage_reduction_percent: i64,
     #[serde(default)]
     happiness_percent: i64,
-    #[serde(default)]
-    last_silo_fire_at: i64,
-    #[serde(default)]
-    last_sam_fire_at: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -247,6 +277,10 @@ struct Attack {
 struct GameState {
     version: i64,
     saved_at: i64,
+    // Game clock baseline, advanced only by tick_world_locked. Separate from
+    // saved_at so mutation-triggered saves do not perturb elapsed-tick math.
+    #[serde(default)]
+    last_tick_at: i64,
     #[serde(default)]
     last_persisted_at: i64,
     #[serde(default)]
@@ -259,6 +293,9 @@ struct GameState {
     nodes: HashMap<String, WorldNode>,
     #[serde(default)]
     attacks: HashMap<String, Attack>,
+    // Per-building cooldowns: node_id -> last-fired ms (Silo/SAM).
+    #[serde(default)]
+    building_cooldowns: HashMap<String, i64>,
 }
 
 impl GameState {
@@ -266,12 +303,14 @@ impl GameState {
         Self {
             version: 1,
             saved_at: now_ms(),
+            last_tick_at: now_ms(),
             last_persisted_at: now_ms(),
             players: HashMap::new(),
             usernames: HashMap::new(),
             sessions: HashMap::new(),
             nodes: HashMap::new(),
             attacks: HashMap::new(),
+            building_cooldowns: HashMap::new(),
         }
     }
 }
@@ -281,6 +320,18 @@ struct AppData {
     node_repo: NodeRepo,
     boundary_repo: BoundaryRepo,
     synced_graph_version: i64,
+    // Cached build_status.json parsed value, keyed by the file's mtime (ms).
+    build_status_cache: Option<(i64, Value)>,
+    // node_id -> player_id of the city whose radius contains the node.
+    // Rebuilt lazily when dirty or when the repo graph version changes.
+    city_membership: HashMap<String, String>,
+    city_membership_dirty: bool,
+    city_membership_graph_version: i64,
+    // player_id -> owned node ids (state.nodes iteration order).
+    player_nodes: HashMap<String, Vec<String>>,
+    player_nodes_dirty: bool,
+    // Background-tick counter driving the periodic session purge.
+    ticks_since_session_purge: u64,
 }
 
 #[derive(Deserialize, Clone)]
@@ -370,6 +421,13 @@ impl App {
                 node_repo: NodeRepo::default(),
                 boundary_repo: BoundaryRepo::default(),
                 synced_graph_version: -1,
+                build_status_cache: None,
+                city_membership: HashMap::new(),
+                city_membership_dirty: true,
+                city_membership_graph_version: -1,
+                player_nodes: HashMap::new(),
+                player_nodes_dirty: true,
+                ticks_since_session_purge: 0,
             }),
             ws_update_sender,
         })
@@ -382,8 +440,14 @@ impl App {
         write_json_file(&self.state_path, state)
     }
 
-    fn current_build_status(&self) -> Value {
-        read_json_value(&self.build_status_path).unwrap_or_else(|| {
+    fn current_build_status(&self, data: &mut AppData) -> Value {
+        let mtime_ms = file_mtime_ms(&self.build_status_path).unwrap_or(0);
+        if let Some((cached_mtime_ms, cached)) = &data.build_status_cache {
+            if *cached_mtime_ms == mtime_ms {
+                return cached.clone();
+            }
+        }
+        let value = read_json_value(&self.build_status_path).unwrap_or_else(|| {
             json!({
                 "phase": "missing",
                 "current": 0,
@@ -392,7 +456,9 @@ impl App {
                 "edge_count": 0,
                 "message": "Builder has not started yet."
             })
-        })
+        });
+        data.build_status_cache = Some((mtime_ms, value.clone()));
+        value
     }
 
     fn ensure_boundary_repo_fresh(&self, data: &mut AppData, force: bool) -> Result<(), String> {
@@ -503,6 +569,15 @@ impl App {
             .collect();
         data.boundary_repo.signature = next_signature;
         data.boundary_repo.refreshed_at = now;
+        let mut overall = BBox::empty();
+        for feature in &data.boundary_repo.features {
+            overall.west = overall.west.min(feature.bbox.west);
+            overall.east = overall.east.max(feature.bbox.east);
+            overall.south = overall.south.min(feature.bbox.south);
+            overall.north = overall.north.max(feature.bbox.north);
+        }
+        data.boundary_repo.overall_bbox =
+            (overall.west <= overall.east && overall.south <= overall.north).then_some(overall);
         Ok(())
     }
 
@@ -783,6 +858,10 @@ impl App {
             return Ok(false);
         }
         data.synced_graph_version = data.node_repo.graph_version;
+        // The world node set changed; cached ownership/city-membership
+        // indexes must be rebuilt before their next use.
+        data.city_membership_dirty = true;
+        data.player_nodes_dirty = true;
         let mut modified = false;
         let valid_node_ids = data.node_repo.nodes_by_id.keys().cloned().collect::<HashSet<_>>();
 
@@ -804,6 +883,7 @@ impl App {
         for node_id in existing_node_ids {
             if !valid_node_ids.contains(&node_id) {
                 data.state.nodes.remove(&node_id);
+                data.state.building_cooldowns.remove(&node_id);
                 modified = true;
             }
         }
@@ -832,7 +912,7 @@ impl App {
     }
 
     fn warm_node_repo(&self) -> Result<(), String> {
-        let mut data = self.inner.lock().unwrap();
+        let mut data = app_lock(&self.inner);
         println!("Warming node repository...");
         self.ensure_node_repo_fresh(&mut data, true)?;
         self.sync_world_nodes_locked(&mut data)?;
@@ -925,33 +1005,87 @@ impl App {
         }
     }
 
-    fn player_city_node_ids_locked(&self, data: &AppData, player_id: &str) -> HashSet<String> {
-        let city_coords: Vec<Coord> = data
+    // Rebuild the node_id -> player_id city-membership map: a node gets an
+    // entry when it lies within CITY_RADIUS_KM of a City building. When radii
+    // of different players' cities overlap, the first matching city wins.
+    // Cost is O(cities x repo nodes), paid only when the dirty flag is set.
+    fn rebuild_city_membership_locked(&self, data: &mut AppData) {
+        let cities: Vec<(String, Coord)> = data
             .state
             .nodes
             .iter()
             .filter(|(_, node)| {
-                node.owner_id.as_deref() == Some(player_id)
-                    && node.building == Some(BuildingType::City)
+                node.owner_id.is_some() && node.building == Some(BuildingType::City)
             })
-            .filter_map(|(id, _)| data.node_repo.coords_by_id.get(id).cloned())
+            .filter_map(|(node_id, node)| {
+                data.node_repo
+                    .coords_by_id
+                    .get(node_id)
+                    .map(|coord| (node.owner_id.clone().unwrap(), *coord))
+            })
             .collect();
-        if city_coords.is_empty() {
-            return HashSet::new();
-        }
-        data.node_repo
-            .nodes_by_id
-            .values()
-            .filter_map(|node| {
-                for city_coord in &city_coords {
+        let mut membership = HashMap::new();
+        if !cities.is_empty() {
+            for node in data.node_repo.nodes_by_id.values() {
+                for (owner_id, city_coord) in &cities {
                     if haversine_km(node.lat, node.lon, city_coord.lat, city_coord.lon)
                         <= CITY_RADIUS_KM
                     {
-                        return Some(node.id.clone());
+                        membership.insert(node.id.clone(), owner_id.clone());
+                        break;
                     }
                 }
-                None
-            })
+            }
+        }
+        data.city_membership = membership;
+        data.city_membership_graph_version = data.node_repo.graph_version;
+        data.city_membership_dirty = false;
+    }
+
+    fn ensure_city_membership_locked(&self, data: &mut AppData) {
+        if data.city_membership_dirty
+            || data.city_membership_graph_version != data.node_repo.graph_version
+        {
+            self.rebuild_city_membership_locked(data);
+        }
+    }
+
+    // Rebuild the player_id -> owned node ids index in one pass over world
+    // nodes, preserving state.nodes iteration order so economy math sees the
+    // same node sequence as a full scan would.
+    fn rebuild_player_nodes_locked(&self, data: &mut AppData) {
+        let mut player_nodes: HashMap<String, Vec<String>> = HashMap::new();
+        for (node_id, node) in data.state.nodes.iter() {
+            if let Some(owner_id) = node.owner_id.as_ref() {
+                player_nodes
+                    .entry(owner_id.clone())
+                    .or_default()
+                    .push(node_id.clone());
+            }
+        }
+        data.player_nodes = player_nodes;
+        data.player_nodes_dirty = false;
+    }
+
+    fn ensure_player_nodes_locked(&self, data: &mut AppData) {
+        if data.player_nodes_dirty {
+            self.rebuild_player_nodes_locked(data);
+        }
+    }
+
+    // Drop sessions past their expiry so state.json does not grow forever.
+    // Returns true when at least one session was removed.
+    fn purge_expired_sessions_locked(&self, data: &mut AppData) -> bool {
+        let now = now_ms();
+        let before = data.state.sessions.len();
+        data.state.sessions.retain(|_, session| session.expires_at > now);
+        data.state.sessions.len() != before
+    }
+
+    fn player_city_node_ids_locked(&self, data: &AppData, player_id: &str) -> HashSet<String> {
+        data.city_membership
+            .iter()
+            .filter_map(|(node_id, owner_id)| (owner_id == player_id).then(|| node_id.clone()))
             .collect()
     }
 
@@ -961,23 +1095,10 @@ impl App {
         node_id: &str,
         player_id: &str,
     ) -> bool {
-        let coord = match data.node_repo.coords_by_id.get(node_id) {
-            Some(c) => c,
-            None => return false,
-        };
-        data.state.nodes.iter().any(|(city_id, city_node)| {
-            city_node.owner_id.as_deref() == Some(player_id)
-                && city_node.building == Some(BuildingType::City)
-                && data
-                    .node_repo
-                    .coords_by_id
-                    .get(city_id)
-                    .map(|city_coord| {
-                        haversine_km(coord.lat, coord.lon, city_coord.lat, city_coord.lon)
-                            <= CITY_RADIUS_KM
-                    })
-                    .unwrap_or(false)
-        })
+        data.city_membership
+            .get(node_id)
+            .map(|owner_id| owner_id == player_id)
+            .unwrap_or(false)
     }
 
     fn nearest_own_city_id_locked(
@@ -988,17 +1109,24 @@ impl App {
     ) -> Option<String> {
         let coord = data.node_repo.coords_by_id.get(node_id)?;
         let mut best: Option<(String, f64)> = None;
-        for (city_id, city_node) in data.state.nodes.iter() {
-            if city_node.owner_id.as_deref() == Some(player_id)
-                && city_node.building == Some(BuildingType::City)
+        for city_id in data.player_nodes.get(player_id).into_iter().flatten() {
+            let is_city = data
+                .state
+                .nodes
+                .get(city_id)
+                .map(|city_node| city_node.building == Some(BuildingType::City))
+                .unwrap_or(false);
+            if !is_city {
+                continue;
+            }
+            let Some(city_coord) = data.node_repo.coords_by_id.get(city_id) else {
+                continue;
+            };
+            let dist = haversine_km(coord.lat, coord.lon, city_coord.lat, city_coord.lon);
+            if dist <= CITY_RADIUS_KM
+                && best.as_ref().map(|(_, d)| dist < *d).unwrap_or(true)
             {
-                let city_coord = data.node_repo.coords_by_id.get(city_id)?;
-                let dist = haversine_km(coord.lat, coord.lon, city_coord.lat, city_coord.lon);
-                if dist <= CITY_RADIUS_KM
-                    && best.as_ref().map(|(_, d)| dist < *d).unwrap_or(true)
-                {
-                    best = Some((city_id.clone(), dist));
-                }
+                best = Some((city_id.clone(), dist));
             }
         }
         best.map(|(id, _)| id)
@@ -1006,22 +1134,24 @@ impl App {
 
     fn recompute_player_economy_locked(&self, data: &mut AppData, player_id: &str) {
         self.update_player_gold_locked(data, player_id);
+        self.ensure_city_membership_locked(data);
+        self.ensure_player_nodes_locked(data);
         let city_nodes = self.player_city_node_ids_locked(data, player_id);
-        let owned_count = data
-            .state
-            .nodes
-            .values()
-            .filter(|node| node.owner_id.as_deref() == Some(player_id))
-            .count() as i64;
+        // Iterate only this player's owned nodes (indexed in state.nodes
+        // iteration order) instead of scanning the whole world per player.
+        let owned_ids = data
+            .player_nodes
+            .get(player_id)
+            .cloned()
+            .unwrap_or_default();
+        let owned_count = owned_ids.len() as i64;
         let mut income = owned_count; // 1 gold per node per second
         let mut hospitals = 0_i64;
         let mut bars = 0_i64;
         let mut markets = 0_i64;
         let mut bank_cities = HashSet::<String>::new();
-        for (node_id, node) in data.state.nodes.iter() {
-            if node.owner_id.as_deref() != Some(player_id) {
-                continue;
-            }
+        for node_id in &owned_ids {
+            let Some(node) = data.state.nodes.get(node_id) else { continue };
             let Some(building) = &node.building else { continue };
             let in_city = city_nodes.contains(node_id);
             match building {
@@ -1046,7 +1176,8 @@ impl App {
         }
         if let Some(player) = data.state.players.get_mut(player_id) {
             player.gold_income_per_sec = income;
-            player.damage_reduction_percent = hospitals;
+            // Clamp at the source so the UI never shows >99% reduction.
+            player.damage_reduction_percent = hospitals.min(99);
             player.happiness_percent = bars;
         }
     }
@@ -1072,6 +1203,8 @@ impl App {
         building: BuildingType,
     ) -> Result<Value, String> {
         self.sync_world_nodes_locked(data)?;
+        self.ensure_city_membership_locked(data);
+        self.ensure_player_nodes_locked(data);
         self.update_player_gold_locked(data, player_id);
         let node = data
             .state
@@ -1131,6 +1264,8 @@ impl App {
             node.building = Some(building);
             node.army = 0;
         }
+        // The set of city buildings (and their radii) may have changed.
+        data.city_membership_dirty = true;
         self.recompute_player_economy_locked(data, player_id);
         data.state.version += 1;
         self.save_state_locked(&mut data.state)?;
@@ -1159,24 +1294,50 @@ impl App {
             "hydrogen" => (MISSILE_HYDROGEN_COST, MISSILE_HYDROGEN_RADIUS_KM),
             _ => return Err("Unknown missile type.".to_string()),
         };
+        // Reject targets outside the loaded map region.
+        if let Some(bbox) = &data.boundary_repo.overall_bbox {
+            if target_lon < bbox.west
+                || target_lon > bbox.east
+                || target_lat < bbox.south
+                || target_lat > bbox.north
+            {
+                return Err("Target is outside the active map region.".to_string());
+            }
+        }
         let now = now_ms();
-        let has_silo = data.state.nodes.values().any(|node| {
-            node.owner_id.as_deref() == Some(player_id) && node.building == Some(BuildingType::Silo)
-        });
-        if !has_silo {
+        let silo_ids: Vec<String> = data
+            .state
+            .nodes
+            .iter()
+            .filter_map(|(node_id, node)| {
+                (node.owner_id.as_deref() == Some(player_id)
+                    && node.building == Some(BuildingType::Silo))
+                .then(|| node_id.clone())
+            })
+            .collect();
+        if silo_ids.is_empty() {
             return Err("You need a Silo to launch missiles.".to_string());
         }
         let player = data.state.players.get(player_id).ok_or_else(|| "Player not found.".to_string())?;
         if player.gold < cost {
             return Err(format!("Not enough gold. This missile costs {} gold.", cost));
         }
-        if now - player.last_silo_fire_at < SILO_COOLDOWN_MS {
-            return Err("Silo is on cooldown.".to_string());
-        }
+        // Cooldowns are per silo: firing requires at least one owned Silo
+        // whose own cooldown is ready, and that silo gets stamped.
+        let ready_silo_id = silo_ids
+            .iter()
+            .find(|node_id| {
+                now - data.state.building_cooldowns.get(*node_id).copied().unwrap_or(0)
+                    >= SILO_COOLDOWN_MS
+            })
+            .cloned()
+            .ok_or_else(|| "Silo is on cooldown.".to_string())?;
 
-        // SAM interception: any enemy SAM within SAM_RADIUS_KM of the target can intercept.
+        // SAM interception: any enemy SAM within SAM_RADIUS_KM of the target
+        // whose own cooldown is ready can intercept.
         let mut intercepted = false;
         let mut interceptor_id: Option<String> = None;
+        let mut interceptor_sam_id: Option<String> = None;
         let sam_owners: Vec<String> = data
             .state
             .players
@@ -1198,27 +1359,24 @@ impl App {
                 if haversine_km(target_lat, target_lon, sam_coord.lat, sam_coord.lon) > SAM_RADIUS_KM {
                     continue;
                 }
-                let sam_player = match data.state.players.get(&owner_id) {
-                    Some(p) => p,
-                    None => continue,
-                };
-                if now - sam_player.last_sam_fire_at < SAM_COOLDOWN_MS {
+                if now - data.state.building_cooldowns.get(sam_node_id).copied().unwrap_or(0)
+                    < SAM_COOLDOWN_MS
+                {
                     continue;
                 }
                 intercepted = true;
                 interceptor_id = Some(owner_id.clone());
+                interceptor_sam_id = Some(sam_node_id.clone());
                 break 'outer;
             }
         }
 
         if intercepted {
-            if let Some(interceptor_id) = &interceptor_id {
-                if let Some(player) = data.state.players.get_mut(interceptor_id) {
-                    player.last_sam_fire_at = now;
-                }
+            if let Some(sam_node_id) = &interceptor_sam_id {
+                data.state.building_cooldowns.insert(sam_node_id.clone(), now);
             }
+            data.state.building_cooldowns.insert(ready_silo_id.clone(), now);
             let player = data.state.players.get_mut(player_id).unwrap();
-            player.last_silo_fire_at = now;
             player.gold -= cost;
             data.state.version += 1;
             self.save_state_locked(&mut data.state)?;
@@ -1250,9 +1408,12 @@ impl App {
                 affected.push(node_id.clone());
             }
         }
+        if !affected.is_empty() {
+            data.player_nodes_dirty = true;
+        }
 
+        data.state.building_cooldowns.insert(ready_silo_id.clone(), now);
         let player = data.state.players.get_mut(player_id).unwrap();
-        player.last_silo_fire_at = now;
         player.gold -= cost;
         self.recompute_player_economy_locked(data, player_id);
         data.state.version += 1;
@@ -1275,7 +1436,7 @@ impl App {
         node_id: &str,
         building: BuildingType,
     ) -> Result<Value, String> {
-        let mut data = self.inner.lock().unwrap();
+        let mut data = app_lock(&self.inner);
         let session = self.require_session_locked(&data, token)?;
         self.build_building_locked(&mut data, &session.player_id, node_id, building)
     }
@@ -1287,7 +1448,7 @@ impl App {
         target_lat: f64,
         target_lon: f64,
     ) -> Result<Value, String> {
-        let mut data = self.inner.lock().unwrap();
+        let mut data = app_lock(&self.inner);
         let session = self.require_session_locked(&data, token)?;
         self.launch_missile_locked(&mut data, &session.player_id, missile_type, target_lat, target_lon)
     }
@@ -1399,16 +1560,22 @@ impl App {
         }
 
         let start = from_node_id.to_string();
-        let mut open = vec![(start.clone(), 0.0_f64)];
+        let mut open = BinaryHeap::<OpenNode>::new();
+        open.push(OpenNode {
+            node_id: start.clone(),
+            score: 0.0,
+        });
         let mut dist = HashMap::<String, f64>::new();
         let mut prev = HashMap::<String, String>::new();
         let mut targets = Vec::<String>::new();
         let mut seen_targets = HashSet::<String>::new();
         dist.insert(start.clone(), 0.0);
 
-        while !open.is_empty() {
-            open.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-            let (current, current_score) = open.remove(0);
+        while let Some(OpenNode {
+            node_id: current,
+            score: current_score,
+        }) = open.pop()
+        {
             let best_score = *dist.get(&current).unwrap_or(&f64::INFINITY);
             if current_score > best_score {
                 continue;
@@ -1433,24 +1600,23 @@ impl App {
                 continue;
             }
 
-            let neighbors = data
-                .node_repo
-                .adjacency
-                .get(&current)
-                .cloned()
-                .unwrap_or_default();
-            for edge in neighbors {
-                if edge.to == start {
-                    continue;
+            if let Some(neighbors) = data.node_repo.adjacency.get(&current) {
+                for edge in neighbors {
+                    if edge.to == start {
+                        continue;
+                    }
+                    let tentative = current_score + edge.weight;
+                    let known = *dist.get(&edge.to).unwrap_or(&f64::INFINITY);
+                    if tentative >= known {
+                        continue;
+                    }
+                    dist.insert(edge.to.clone(), tentative);
+                    prev.insert(edge.to.clone(), current.clone());
+                    open.push(OpenNode {
+                        node_id: edge.to.clone(),
+                        score: tentative,
+                    });
                 }
-                let tentative = current_score + edge.weight;
-                let known = *dist.get(&edge.to).unwrap_or(&f64::INFINITY);
-                if tentative >= known {
-                    continue;
-                }
-                dist.insert(edge.to.clone(), tentative);
-                prev.insert(edge.to.clone(), current.clone());
-                open.push((edge.to, tentative));
             }
         }
 
@@ -1475,7 +1641,7 @@ impl App {
             return Err("Password must be at least 4 characters.".to_string());
         }
         let start_node_id = start_node_id.map(|s| s.trim()).filter(|s| !s.is_empty());
-        let mut data = self.inner.lock().unwrap();
+        let mut data = app_lock(&self.inner);
         if data.state.usernames.contains_key(&normalized) {
             return Err("Username already exists.".to_string());
         }
@@ -1496,6 +1662,7 @@ impl App {
                 },
             );
         }
+        data.player_nodes_dirty = true;
         let now = now_ms();
         data.state.players.insert(
             player_id.clone(),
@@ -1511,8 +1678,6 @@ impl App {
                 gold_updated_at: now,
                 damage_reduction_percent: 0,
                 happiness_percent: 0,
-                last_silo_fire_at: 0,
-                last_sam_fire_at: 0,
             },
         );
         self.recompute_player_economy_locked(&mut data, &player_id);
@@ -1526,13 +1691,14 @@ impl App {
                 expires_at: now + 7 * 24 * 60 * 60 * 1000,
             },
         );
+        self.purge_expired_sessions_locked(&mut data);
         self.save_state_locked(&mut data.state)?;
         Ok(json!({ "playerId": player_id, "token": session_token }))
     }
 
     fn login_player(&self, username: &str, password: &str) -> Result<Value, String> {
         let normalized = username.trim().to_lowercase();
-        let mut data = self.inner.lock().unwrap();
+        let mut data = app_lock(&self.inner);
         let player_id = data
             .state
             .usernames
@@ -1565,12 +1731,13 @@ impl App {
                 player_ref.password_hash = hash_password_argon2(password)?;
             }
         }
+        self.purge_expired_sessions_locked(&mut data);
         self.save_state_locked(&mut data.state)?;
         Ok(json!({ "playerId": player_id, "token": session_token }))
     }
 
     fn logout_player(&self, token: &str) -> Result<Value, String> {
-        let mut data = self.inner.lock().unwrap();
+        let mut data = app_lock(&self.inner);
         data.state.sessions.remove(token);
         self.save_state_locked(&mut data.state)?;
         Ok(json!({ "ok": true }))
@@ -1680,10 +1847,19 @@ impl App {
                 let damage = effective_flow as i64;
                 target_node.army -= damage;
                 if target_node.army < 0 {
+                    let had_building = target_node.building.is_some();
                     target_node.owner_id = Some(attack.owner_id.clone());
                     target_node.army = target_node.army.abs().max(1);
-                    // Destroy any building on a captured node.
+                    // Destroy any building on a captured node. Only a captured
+                    // node that actually held a building can change city
+                    // membership; ownership flips always change the
+                    // player-nodes index.
+                    if had_building {
+                        data.city_membership_dirty = true;
+                        data.state.building_cooldowns.remove(&attack.to_node_id);
+                    }
                     target_node.building = None;
+                    data.player_nodes_dirty = true;
                     if let Some(existing_attack) = data.state.attacks.get_mut(&attack_id) {
                         existing_attack.mode = "transfer".to_string();
                     }
@@ -1709,8 +1885,8 @@ impl App {
 
     fn tick_world_locked(&self, data: &mut AppData) -> Result<(), String> {
         let current = now_ms();
-        let last = if data.state.saved_at > 0 {
-            data.state.saved_at
+        let last = if data.state.last_tick_at > 0 {
+            data.state.last_tick_at
         } else {
             current
         };
@@ -1724,7 +1900,7 @@ impl App {
         for _ in 0..elapsed_ticks {
             self.step_world_locked(data)?;
         }
-        data.state.saved_at = current;
+        data.state.last_tick_at = current;
         // Avoid serializing the entire world to disk every single second.
         // The background ticker only persists every 5 seconds; mutating
         // endpoints still call save_state_locked directly when they change state.
@@ -1776,15 +1952,20 @@ impl App {
             .copied()
             .ok_or_else(|| "Missing road coordinates for one of the nodes.".to_string())?;
 
-        let mut open = vec![(start.clone(), 0.0_f64)];
+        let mut open = BinaryHeap::<OpenNode>::new();
+        open.push(OpenNode {
+            node_id: start.clone(),
+            score: 0.0,
+        });
         let mut g_score = HashMap::<String, f64>::new();
         let mut prev = HashMap::<String, String>::new();
         let mut visited = HashSet::<String>::new();
         g_score.insert(start, 0.0);
 
-        while !open.is_empty() {
-            open.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-            let (current, _) = open.remove(0);
+        while let Some(OpenNode {
+            node_id: current, ..
+        }) = open.pop()
+        {
             if current == goal {
                 let path = self.reconstruct_path_locked(data, &prev, &goal);
                 data.node_repo.route_cache.insert(cache_key, path.clone());
@@ -1793,29 +1974,28 @@ impl App {
             if !visited.insert(current.clone()) {
                 continue;
             }
-            let neighbors = data
-                .node_repo
-                .adjacency
-                .get(&current)
-                .cloned()
-                .unwrap_or_default();
-            for edge in neighbors {
-                let current_score = *g_score.get(&current).unwrap_or(&f64::INFINITY);
-                let best_neighbor_score = *g_score.get(&edge.to).unwrap_or(&f64::INFINITY);
-                let tentative = current_score + edge.weight;
-                if tentative >= best_neighbor_score {
-                    continue;
+            let current_score = *g_score.get(&current).unwrap_or(&f64::INFINITY);
+            if let Some(neighbors) = data.node_repo.adjacency.get(&current) {
+                for edge in neighbors {
+                    let best_neighbor_score = *g_score.get(&edge.to).unwrap_or(&f64::INFINITY);
+                    let tentative = current_score + edge.weight;
+                    if tentative >= best_neighbor_score {
+                        continue;
+                    }
+                    prev.insert(edge.to.clone(), current.clone());
+                    g_score.insert(edge.to.clone(), tentative);
+                    let heuristic = data
+                        .node_repo
+                        .coords_by_id
+                        .get(&edge.to)
+                        .copied()
+                        .map(|coord| haversine_km(coord.lat, coord.lon, goal_coord.lat, goal_coord.lon))
+                        .unwrap_or(0.0);
+                    open.push(OpenNode {
+                        node_id: edge.to.clone(),
+                        score: tentative + heuristic,
+                    });
                 }
-                prev.insert(edge.to.clone(), current.clone());
-                g_score.insert(edge.to.clone(), tentative);
-                let heuristic = data
-                    .node_repo
-                    .coords_by_id
-                    .get(&edge.to)
-                    .copied()
-                    .map(|coord| haversine_km(coord.lat, coord.lon, goal_coord.lat, goal_coord.lon))
-                    .unwrap_or(0.0);
-                open.push((edge.to, tentative + heuristic));
             }
         }
 
@@ -2025,13 +2205,14 @@ impl App {
     }
 
     fn game_state_response(&self, token: Option<&str>, include_nodes: bool) -> Result<Value, String> {
-        let data = self.inner.lock().unwrap();
+        let mut data = app_lock(&self.inner);
         let session = token
             .map(|token| self.require_session_locked(&data, token))
             .transpose()?;
         // The background ticker advances the world, so read-only responses
         // do not need to pay for a full lock-held tick.
         let player_id = session.as_ref().map(|session| session.player_id.as_str());
+        self.ensure_city_membership_locked(&mut data);
         let owned_nodes = self.owned_node_features_locked(&data, player_id);
         let node_features = if include_nodes {
             data.state
@@ -2058,7 +2239,7 @@ impl App {
                 "damageReductionPercent": player.damage_reduction_percent,
                 "happinessPercent": player.happiness_percent
             })),
-            "buildStatus": self.current_build_status(),
+            "buildStatus": self.current_build_status(&mut data),
             "cityFeatures": {
                 "type": "FeatureCollection",
                 "features": self.city_features_locked(&data)
@@ -2096,7 +2277,7 @@ impl App {
     }
 
     fn leaderboard_response(&self, token: Option<&str>) -> Result<Value, String> {
-        let data = self.inner.lock().unwrap();
+        let data = app_lock(&self.inner);
         let session = token
             .map(|token| self.require_session_locked(&data, token))
             .transpose()?;
@@ -2161,13 +2342,41 @@ impl App {
     ) -> Result<Vec<String>, String> {
         self.ensure_node_repo_fresh(data, false)?;
         let zoom = clamp_i64(z, 0, 22);
+        let tiles_per_side = 1_i64 << zoom;
+        if x < 0 || y < 0 || x >= tiles_per_side || y >= tiles_per_side {
+            return Err("Invalid tile coordinates.".to_string());
+        }
         let key = format!("{}:{}:{}:{}", data.node_repo.graph_version, zoom, x, y);
         if let Some(ids) = data.node_repo.tile_node_id_cache.get(&key) {
             return Ok(ids.clone());
         }
         let bounds = tile_bounds(zoom, x, y);
+        // Cheap reject: tiles outside the loaded region's overall bbox cannot
+        // contain any nodes, so skip the S2 cover recursion entirely.
+        if let Some(region) = data.boundary_repo.overall_bbox {
+            let intersects = bounds.west <= region.east
+                && bounds.east >= region.west
+                && bounds.south <= region.north
+                && bounds.north >= region.south;
+            if !intersects {
+                return Ok(Vec::new());
+            }
+        }
+        // Clamp the cover to the region: a low-zoom tile (z=0 covers the whole
+        // planet) must not make the S2 cover recursion walk cells that cannot
+        // contain any node. `bounds` itself stays unclamped so the exact
+        // per-node filter below keeps its tile-border semantics.
+        let cover_bounds = match &data.boundary_repo.overall_bbox {
+            Some(region) => BBox {
+                west: bounds.west.max(region.west),
+                east: bounds.east.min(region.east),
+                south: bounds.south.max(region.south),
+                north: bounds.north.min(region.north),
+            },
+            None => bounds.clone(),
+        };
         let level = data.node_repo.s2_index_level;
-        let cover = s2_cover_for_bounds(&bounds, level);
+        let cover = s2_cover_for_bounds(&cover_bounds, level);
         let mut node_ids = Vec::new();
         for cell in cover {
             if let Some(&(start, end)) = data.node_repo.s2_cell_ranges.get(&cell.0) {
@@ -2199,10 +2408,13 @@ impl App {
         x: i64,
         y: i64,
     ) -> Result<Value, String> {
-        let mut data = self.inner.lock().unwrap();
+        let mut data = app_lock(&self.inner);
         let session = self.require_session_locked(&data, token)?;
         let player_id = Some(session.player_id.as_str());
         let node_ids = self.node_ids_for_tile_locked(&mut data, z, x, y)?;
+        // The repo may have been reloaded above; refresh caches before
+        // world_feature_locked consults them.
+        self.ensure_city_membership_locked(&mut data);
         let features = node_ids
             .iter()
             .filter_map(|node_id| self.world_feature_locked(&data, node_id, player_id))
@@ -2224,7 +2436,7 @@ impl App {
         from_node_id: &str,
         candidate_node_ids: &[String],
     ) -> Result<Value, String> {
-        let mut data = self.inner.lock().unwrap();
+        let mut data = app_lock(&self.inner);
         let session = self.require_session_locked(&data, token)?;
         if candidate_node_ids.len() > 20_000 {
             return Err("Too many candidate nodes requested.".to_string());
@@ -2239,6 +2451,9 @@ impl App {
             return Err("You can only connect from your own node.".to_string());
         }
         let immediate_targets = self.immediate_neighbor_targets_locked(&mut data, from_node_id)?;
+        // The repo may have been reloaded above; refresh caches before
+        // world_feature_locked consults them.
+        self.ensure_city_membership_locked(&mut data);
         let candidate_filter = if candidate_node_ids.is_empty() || candidate_node_ids.len() > 20_000 {
             None
         } else {
@@ -2275,9 +2490,8 @@ impl App {
         from_node_id: &str,
         to_node_id: &str,
     ) -> Result<Value, String> {
-        let mut data = self.inner.lock().unwrap();
+        let mut data = app_lock(&self.inner);
         let session = self.require_session_locked(&data, token)?;
-        self.tick_world_locked(&mut data)?;
         let matching_ids = data
             .state
             .attacks
@@ -2312,7 +2526,7 @@ impl App {
         from_node_id: &str,
         to_node_id: &str,
     ) -> Result<Value, String> {
-        let mut data = self.inner.lock().unwrap();
+        let mut data = app_lock(&self.inner);
         let session = self.require_session_locked(&data, token)?;
         let (mode, path, owner_state) =
             self.resolve_connection_locked(&mut data, &session.player_id, from_node_id, to_node_id)?;
@@ -2333,9 +2547,8 @@ impl App {
         to_node_id: &str,
         send_per_tick: i64,
     ) -> Result<Value, String> {
-        let mut data = self.inner.lock().unwrap();
+        let mut data = app_lock(&self.inner);
         let session = self.require_session_locked(&data, token)?;
-        self.tick_world_locked(&mut data)?;
         let existing_attack_id = data
             .state
             .attacks
@@ -2388,9 +2601,8 @@ impl App {
         to_node_id: &str,
         send_per_tick: i64,
     ) -> Result<Value, String> {
-        let mut data = self.inner.lock().unwrap();
+        let mut data = app_lock(&self.inner);
         let session = self.require_session_locked(&data, token)?;
-        self.tick_world_locked(&mut data)?;
         let next_rate = sanitize_send_per_tick(send_per_tick);
         let attack = data
             .state
@@ -2408,8 +2620,17 @@ impl App {
     }
 
     fn background_tick(&self) -> Result<(), String> {
-        let mut data = self.inner.lock().unwrap();
+        let mut data = app_lock(&self.inner);
         self.tick_world_locked(&mut data)?;
+        // Periodically drop expired sessions so state.json does not grow
+        // forever; persist only when something was actually removed.
+        data.ticks_since_session_purge += 1;
+        if data.ticks_since_session_purge >= 60 {
+            data.ticks_since_session_purge = 0;
+            if self.purge_expired_sessions_locked(&mut data) {
+                self.save_state_locked(&mut data.state)?;
+            }
+        }
         let version = data.state.version;
         let update = json!({
             "type": "world-update",
@@ -2458,6 +2679,12 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+// Tolerate mutex poisoning: a panicking request handler must not take down
+// every subsequent request with "PoisonError" unwraps.
+fn app_lock(m: &Mutex<AppData>) -> std::sync::MutexGuard<'_, AppData> {
+    m.lock().unwrap_or_else(|err| err.into_inner())
+}
+
 fn file_mtime_ms(path: &Path) -> Option<i64> {
     fs::metadata(path)
         .ok()?
@@ -2483,8 +2710,10 @@ fn write_json_file<T>(path: &Path, value: &T) -> Result<(), String>
 where
     T: Serialize,
 {
+    // Compact serialization: this helper only writes game_data/state.json,
+    // which is large and machine-read only.
     let tmp_path = PathBuf::from(format!("{}.tmp", path.display()));
-    let bytes = serde_json::to_vec_pretty(value).map_err(|err| err.to_string())?;
+    let bytes = serde_json::to_vec(value).map_err(|err| err.to_string())?;
     fs::write(&tmp_path, bytes).map_err(|err| err.to_string())?;
     fs::rename(&tmp_path, path).map_err(|err| err.to_string())
 }
@@ -2626,10 +2855,11 @@ fn point_in_ring(lon: f64, lat: f64, ring: &[(f64, f64)]) -> bool {
     for i in 0..ring.len() {
         let (xi, yi) = ring[i];
         let (xj, yj) = ring[j];
-        let intersects = ((yi > lat) != (yj > lat))
-            && (lon < ((xj - xi) * (lat - yi)) / ((yj - yi).abs().max(f64::EPSILON)) + xi);
-        if intersects {
-            inside = !inside;
+        if (yi > lat) != (yj > lat) {
+            let x_intersection = xi + (lat - yi) * (xj - xi) / (yj - yi);
+            if lon < x_intersection {
+                inside = !inside;
+            }
         }
         j = i;
     }
@@ -2794,7 +3024,7 @@ fn s2_cell_rect(cell: &CellID) -> S2Rect {
     s2::cell::Cell::from(*cell).rect_bound()
 }
 
-fn run_websocket_server(app: Arc<App>, update_rx: crossbeam_channel::Receiver<String>, port: u16) {
+fn run_websocket_server(app: Arc<App>, update_rx: crossbeam_channel::Receiver<String>, port: u16, bind_addr: String) {
     let rt = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(err) => {
@@ -2806,14 +3036,17 @@ fn run_websocket_server(app: Arc<App>, update_rx: crossbeam_channel::Receiver<St
     rt.block_on(async move {
         let (broadcast_tx, _) = tokio::sync::broadcast::channel::<String>(64);
 
+        // Bridge the crossbeam channel into the broadcast channel on a
+        // dedicated plain thread; recv() blocks, so it must not sit on a
+        // tokio worker. broadcast::Sender::send is sync-safe.
         let broadcast_tx2 = broadcast_tx.clone();
-        tokio::spawn(async move {
+        thread::spawn(move || {
             while let Ok(msg) = update_rx.recv() {
                 let _ = broadcast_tx2.send(msg);
             }
         });
 
-        let addr = format!("0.0.0.0:{port}");
+        let addr = format!("{bind_addr}:{port}");
         let listener = match tokio::net::TcpListener::bind(&addr).await {
             Ok(listener) => listener,
             Err(err) => {
@@ -2857,8 +3090,10 @@ async fn handle_ws_client(
                 if let Ok(value) = serde_json::from_str::<Value>(&text) {
                     if value.get("type").and_then(Value::as_str) == Some("auth") {
                         if let Some(token) = value.get("token").and_then(Value::as_str) {
-                            let data = app.inner.lock().unwrap();
-                            if let Some(session) = data.state.sessions.get(token) {
+                            let data = app_lock(&app.inner);
+                            // Same rules as HTTP auth: session exists, is
+                            // unexpired, and references an existing player.
+                            if let Ok(session) = app.require_session_locked(&data, token) {
                                 return Some(session.player_id.clone());
                             }
                         }
@@ -3025,8 +3260,7 @@ fn handle_request(app: &Arc<App>, mut request: Request) {
                 Ok(json_response(200, &app.login_player(username, password)?))
             }
             (&Method::Get, "/api/game-state") => {
-                let token = extract_bearer_token(&request)
-                    .or_else(|| query.get("token").cloned());
+                let token = extract_bearer_token(&request);
                 let include_nodes = query.get("view").map(String::as_str) != Some("summary");
                 Ok(json_response(200, &app.game_state_response(token.as_deref(), include_nodes)?))
             }
@@ -3082,9 +3316,32 @@ fn handle_request(app: &Arc<App>, mut request: Request) {
                 ))
             }
             (&Method::Post, "/api/build") => {
-                Ok(json_response(404, &json!({"error": "building system disabled"})))
+                if !BUILDINGS_ENABLED {
+                    return Ok(json_response(403, &json!({"error": "building system disabled"})));
+                }
+                let body = parse_body_json(&mut request)?;
+                let token = body
+                    .get("token")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "Invalid session.".to_string())?;
+                let node_id = body
+                    .get("nodeId")
+                    .and_then(value_to_string)
+                    .ok_or_else(|| "Invalid node.".to_string())?;
+                let building = body
+                    .get("building")
+                    .and_then(Value::as_str)
+                    .and_then(BuildingType::from_str)
+                    .ok_or_else(|| "Unknown building type.".to_string())?;
+                Ok(json_response(
+                    200,
+                    &app.build_building_request(token, &node_id, building)?,
+                ))
             }
             (&Method::Post, "/api/launch-missile") => {
+                if !BUILDINGS_ENABLED {
+                    return Ok(json_response(403, &json!({"error": "building system disabled"})));
+                }
                 let body = parse_body_json(&mut request)?;
                 let token = body
                     .get("token")
@@ -3185,7 +3442,10 @@ fn handle_request(app: &Arc<App>, mut request: Request) {
                     &app.connection_preview_request(token, &from_node_id, &to_node_id)?,
                 ))
             }
-            (&Method::Get, "/api/build-status") => Ok(json_response(200, &app.current_build_status())),
+            (&Method::Get, "/api/build-status") => {
+                let mut data = app_lock(&app.inner);
+                Ok(json_response(200, &app.current_build_status(&mut data)))
+            }
             _ => Ok(app.serve_static(&pathname)),
         }
     })()
@@ -3199,12 +3459,20 @@ fn main() {
     let (ws_update_sender, ws_update_receiver) = crossbeam_channel::unbounded::<String>();
     let app = Arc::new(App::new(root, ws_update_sender).expect("failed to initialize app"));
 
+    // BIND_ADDR selects the interface both servers bind to (default keeps the
+    // historical behavior of listening on every interface).
+    let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0".to_string());
+    if bind_addr == "0.0.0.0" {
+        println!("WARNING: BIND_ADDR=0.0.0.0 exposes the API on all network interfaces; front it with TLS/a reverse proxy in production.");
+    }
+
     let ws_app = app.clone();
     let ws_port = std::env::var("WS_PORT")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(8003);
-    thread::spawn(move || run_websocket_server(ws_app, ws_update_receiver, ws_port));
+    let ws_bind_addr = bind_addr.clone();
+    thread::spawn(move || run_websocket_server(ws_app, ws_update_receiver, ws_port, ws_bind_addr));
 
     let ticker_app = app.clone();
     thread::spawn(move || loop {
@@ -3222,15 +3490,32 @@ fn main() {
         .ok()
         .or_else(|| std::env::args().nth(1))
         .unwrap_or_else(|| "8002".to_string());
-    let address = format!("0.0.0.0:{port}");
+    let address = format!("{bind_addr}:{port}");
     let server = Server::http(&address).unwrap_or_else(|error| panic!("failed to bind {address}: {error}"));
-    println!("Game server listening on http://0.0.0.0:{port}");
-    println!("WebSocket server listening on ws://0.0.0.0:{ws_port}/ws");
+    println!("Game server listening on http://{address}");
+    println!("WebSocket server listening on ws://{bind_addr}:{ws_port}/ws");
+    println!("Interfaces/ports configurable via BIND_ADDR, PORT, WS_PORT env vars.");
 
+    // Bound the number of in-flight request threads: acquire a slot before
+    // spawning; when saturated this blocks and tiny_http queues connections.
+    let worker_slots = Arc::new((Mutex::new(MAX_HTTP_WORKERS), Condvar::new()));
     for request in server.incoming_requests() {
+        {
+            let (lock, cvar) = &*worker_slots;
+            let mut available = lock.lock().unwrap_or_else(|err| err.into_inner());
+            while *available == 0 {
+                available = cvar.wait(available).unwrap_or_else(|err| err.into_inner());
+            }
+            *available -= 1;
+        }
         let app = app.clone();
+        let worker_slots = worker_slots.clone();
         thread::spawn(move || {
             handle_request(&app, request);
+            let (lock, cvar) = &*worker_slots;
+            let mut available = lock.lock().unwrap_or_else(|err| err.into_inner());
+            *available += 1;
+            cvar.notify_one();
         });
     }
 }
