@@ -430,8 +430,14 @@ impl App {
         write_json_file(&self.state_path, state)
     }
 
-    fn current_build_status(&self) -> Value {
-        read_json_value(&self.build_status_path).unwrap_or_else(|| {
+    fn current_build_status(&self, data: &mut AppData) -> Value {
+        let mtime_ms = file_mtime_ms(&self.build_status_path).unwrap_or(0);
+        if let Some((cached_mtime_ms, cached)) = &data.build_status_cache {
+            if *cached_mtime_ms == mtime_ms {
+                return cached.clone();
+            }
+        }
+        let value = read_json_value(&self.build_status_path).unwrap_or_else(|| {
             json!({
                 "phase": "missing",
                 "current": 0,
@@ -440,7 +446,9 @@ impl App {
                 "edge_count": 0,
                 "message": "Builder has not started yet."
             })
-        })
+        });
+        data.build_status_cache = Some((mtime_ms, value.clone()));
+        value
     }
 
     fn ensure_boundary_repo_fresh(&self, data: &mut AppData, force: bool) -> Result<(), String> {
@@ -2631,8 +2639,10 @@ fn write_json_file<T>(path: &Path, value: &T) -> Result<(), String>
 where
     T: Serialize,
 {
+    // Compact serialization: this helper only writes game_data/state.json,
+    // which is large and machine-read only.
     let tmp_path = PathBuf::from(format!("{}.tmp", path.display()));
-    let bytes = serde_json::to_vec_pretty(value).map_err(|err| err.to_string())?;
+    let bytes = serde_json::to_vec(value).map_err(|err| err.to_string())?;
     fs::write(&tmp_path, bytes).map_err(|err| err.to_string())?;
     fs::rename(&tmp_path, path).map_err(|err| err.to_string())
 }
