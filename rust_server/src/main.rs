@@ -21,6 +21,7 @@ use url::form_urlencoded;
 
 const WORLD_TICK_MS: u64 = 1000;
 const MAX_CATCH_UP_TICKS: usize = 60; // Avoid freezing after the server has been offline for a while.
+const MAX_HTTP_WORKERS: usize = 64; // Cap in-flight request handler threads.
 const REPO_REFRESH_MS: i64 = 10_000;
 const ARMY_CAP: i64 = 1_000_000;
 const CITY_RADIUS_KM: f64 = 2.0;
@@ -3018,7 +3019,7 @@ fn s2_cell_rect(cell: &CellID) -> S2Rect {
     s2::cell::Cell::from(*cell).rect_bound()
 }
 
-fn run_websocket_server(app: Arc<App>, update_rx: crossbeam_channel::Receiver<String>, port: u16) {
+fn run_websocket_server(app: Arc<App>, update_rx: crossbeam_channel::Receiver<String>, port: u16, bind_addr: String) {
     let rt = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(err) => {
@@ -3030,14 +3031,17 @@ fn run_websocket_server(app: Arc<App>, update_rx: crossbeam_channel::Receiver<St
     rt.block_on(async move {
         let (broadcast_tx, _) = tokio::sync::broadcast::channel::<String>(64);
 
+        // Bridge the crossbeam channel into the broadcast channel on a
+        // dedicated plain thread; recv() blocks, so it must not sit on a
+        // tokio worker. broadcast::Sender::send is sync-safe.
         let broadcast_tx2 = broadcast_tx.clone();
-        tokio::spawn(async move {
+        thread::spawn(move || {
             while let Ok(msg) = update_rx.recv() {
                 let _ = broadcast_tx2.send(msg);
             }
         });
 
-        let addr = format!("0.0.0.0:{port}");
+        let addr = format!("{bind_addr}:{port}");
         let listener = match tokio::net::TcpListener::bind(&addr).await {
             Ok(listener) => listener,
             Err(err) => {
@@ -3427,12 +3431,20 @@ fn main() {
     let (ws_update_sender, ws_update_receiver) = crossbeam_channel::unbounded::<String>();
     let app = Arc::new(App::new(root, ws_update_sender).expect("failed to initialize app"));
 
+    // BIND_ADDR selects the interface both servers bind to (default keeps the
+    // historical behavior of listening on every interface).
+    let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0".to_string());
+    if bind_addr == "0.0.0.0" {
+        println!("WARNING: BIND_ADDR=0.0.0.0 exposes the API on all network interfaces; front it with TLS/a reverse proxy in production.");
+    }
+
     let ws_app = app.clone();
     let ws_port = std::env::var("WS_PORT")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(8003);
-    thread::spawn(move || run_websocket_server(ws_app, ws_update_receiver, ws_port));
+    let ws_bind_addr = bind_addr.clone();
+    thread::spawn(move || run_websocket_server(ws_app, ws_update_receiver, ws_port, ws_bind_addr));
 
     let ticker_app = app.clone();
     thread::spawn(move || loop {
@@ -3450,15 +3462,32 @@ fn main() {
         .ok()
         .or_else(|| std::env::args().nth(1))
         .unwrap_or_else(|| "8002".to_string());
-    let address = format!("0.0.0.0:{port}");
+    let address = format!("{bind_addr}:{port}");
     let server = Server::http(&address).unwrap_or_else(|error| panic!("failed to bind {address}: {error}"));
-    println!("Game server listening on http://0.0.0.0:{port}");
-    println!("WebSocket server listening on ws://0.0.0.0:{ws_port}/ws");
+    println!("Game server listening on http://{address}");
+    println!("WebSocket server listening on ws://{bind_addr}:{ws_port}/ws");
+    println!("Interfaces/ports configurable via BIND_ADDR, PORT, WS_PORT env vars.");
 
+    // Bound the number of in-flight request threads: acquire a slot before
+    // spawning; when saturated this blocks and tiny_http queues connections.
+    let worker_slots = Arc::new((Mutex::new(MAX_HTTP_WORKERS), Condvar::new()));
     for request in server.incoming_requests() {
+        {
+            let (lock, cvar) = &*worker_slots;
+            let mut available = lock.lock().unwrap_or_else(|err| err.into_inner());
+            while *available == 0 {
+                available = cvar.wait(available).unwrap_or_else(|err| err.into_inner());
+            }
+            *available -= 1;
+        }
         let app = app.clone();
+        let worker_slots = worker_slots.clone();
         thread::spawn(move || {
             handle_request(&app, request);
+            let (lock, cvar) = &*worker_slots;
+            let mut available = lock.lock().unwrap_or_else(|err| err.into_inner());
+            *available += 1;
+            cvar.notify_one();
         });
     }
 }
