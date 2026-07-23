@@ -230,10 +230,6 @@ struct Player {
     damage_reduction_percent: i64,
     #[serde(default)]
     happiness_percent: i64,
-    #[serde(default)]
-    last_silo_fire_at: i64,
-    #[serde(default)]
-    last_sam_fire_at: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -314,6 +310,18 @@ struct AppData {
     node_repo: NodeRepo,
     boundary_repo: BoundaryRepo,
     synced_graph_version: i64,
+    // Cached build_status.json parsed value, keyed by the file's mtime (ms).
+    build_status_cache: Option<(i64, Value)>,
+    // node_id -> player_id of the city whose radius contains the node.
+    // Rebuilt lazily when dirty or when the repo graph version changes.
+    city_membership: HashMap<String, String>,
+    city_membership_dirty: bool,
+    city_membership_graph_version: i64,
+    // player_id -> owned node ids (state.nodes iteration order).
+    player_nodes: HashMap<String, Vec<String>>,
+    player_nodes_dirty: bool,
+    // Background-tick counter driving the periodic session purge.
+    ticks_since_session_purge: u64,
 }
 
 #[derive(Deserialize, Clone)]
@@ -403,6 +411,13 @@ impl App {
                 node_repo: NodeRepo::default(),
                 boundary_repo: BoundaryRepo::default(),
                 synced_graph_version: -1,
+                build_status_cache: None,
+                city_membership: HashMap::new(),
+                city_membership_dirty: true,
+                city_membership_graph_version: -1,
+                player_nodes: HashMap::new(),
+                player_nodes_dirty: true,
+                ticks_since_session_purge: 0,
             }),
             ws_update_sender,
         })
@@ -816,6 +831,10 @@ impl App {
             return Ok(false);
         }
         data.synced_graph_version = data.node_repo.graph_version;
+        // The world node set changed; cached ownership/city-membership
+        // indexes must be rebuilt before their next use.
+        data.city_membership_dirty = true;
+        data.player_nodes_dirty = true;
         let mut modified = false;
         let valid_node_ids = data.node_repo.nodes_by_id.keys().cloned().collect::<HashSet<_>>();
 
@@ -1048,23 +1067,10 @@ impl App {
         node_id: &str,
         player_id: &str,
     ) -> bool {
-        let coord = match data.node_repo.coords_by_id.get(node_id) {
-            Some(c) => c,
-            None => return false,
-        };
-        data.state.nodes.iter().any(|(city_id, city_node)| {
-            city_node.owner_id.as_deref() == Some(player_id)
-                && city_node.building == Some(BuildingType::City)
-                && data
-                    .node_repo
-                    .coords_by_id
-                    .get(city_id)
-                    .map(|city_coord| {
-                        haversine_km(coord.lat, coord.lon, city_coord.lat, city_coord.lon)
-                            <= CITY_RADIUS_KM
-                    })
-                    .unwrap_or(false)
-        })
+        data.city_membership
+            .get(node_id)
+            .map(|owner_id| owner_id == player_id)
+            .unwrap_or(false)
     }
 
     fn nearest_own_city_id_locked(
@@ -1075,17 +1081,24 @@ impl App {
     ) -> Option<String> {
         let coord = data.node_repo.coords_by_id.get(node_id)?;
         let mut best: Option<(String, f64)> = None;
-        for (city_id, city_node) in data.state.nodes.iter() {
-            if city_node.owner_id.as_deref() == Some(player_id)
-                && city_node.building == Some(BuildingType::City)
+        for city_id in data.player_nodes.get(player_id).into_iter().flatten() {
+            let is_city = data
+                .state
+                .nodes
+                .get(city_id)
+                .map(|city_node| city_node.building == Some(BuildingType::City))
+                .unwrap_or(false);
+            if !is_city {
+                continue;
+            }
+            let Some(city_coord) = data.node_repo.coords_by_id.get(city_id) else {
+                continue;
+            };
+            let dist = haversine_km(coord.lat, coord.lon, city_coord.lat, city_coord.lon);
+            if dist <= CITY_RADIUS_KM
+                && best.as_ref().map(|(_, d)| dist < *d).unwrap_or(true)
             {
-                let city_coord = data.node_repo.coords_by_id.get(city_id)?;
-                let dist = haversine_km(coord.lat, coord.lon, city_coord.lat, city_coord.lon);
-                if dist <= CITY_RADIUS_KM
-                    && best.as_ref().map(|(_, d)| dist < *d).unwrap_or(true)
-                {
-                    best = Some((city_id.clone(), dist));
-                }
+                best = Some((city_id.clone(), dist));
             }
         }
         best.map(|(id, _)| id)
@@ -1093,22 +1106,24 @@ impl App {
 
     fn recompute_player_economy_locked(&self, data: &mut AppData, player_id: &str) {
         self.update_player_gold_locked(data, player_id);
+        self.ensure_city_membership_locked(data);
+        self.ensure_player_nodes_locked(data);
         let city_nodes = self.player_city_node_ids_locked(data, player_id);
-        let owned_count = data
-            .state
-            .nodes
-            .values()
-            .filter(|node| node.owner_id.as_deref() == Some(player_id))
-            .count() as i64;
+        // Iterate only this player's owned nodes (indexed in state.nodes
+        // iteration order) instead of scanning the whole world per player.
+        let owned_ids = data
+            .player_nodes
+            .get(player_id)
+            .cloned()
+            .unwrap_or_default();
+        let owned_count = owned_ids.len() as i64;
         let mut income = owned_count; // 1 gold per node per second
         let mut hospitals = 0_i64;
         let mut bars = 0_i64;
         let mut markets = 0_i64;
         let mut bank_cities = HashSet::<String>::new();
-        for (node_id, node) in data.state.nodes.iter() {
-            if node.owner_id.as_deref() != Some(player_id) {
-                continue;
-            }
+        for node_id in &owned_ids {
+            let Some(node) = data.state.nodes.get(node_id) else { continue };
             let Some(building) = &node.building else { continue };
             let in_city = city_nodes.contains(node_id);
             match building {
@@ -1133,7 +1148,8 @@ impl App {
         }
         if let Some(player) = data.state.players.get_mut(player_id) {
             player.gold_income_per_sec = income;
-            player.damage_reduction_percent = hospitals;
+            // Clamp at the source so the UI never shows >99% reduction.
+            player.damage_reduction_percent = hospitals.min(99);
             player.happiness_percent = bars;
         }
     }
@@ -1159,6 +1175,8 @@ impl App {
         building: BuildingType,
     ) -> Result<Value, String> {
         self.sync_world_nodes_locked(data)?;
+        self.ensure_city_membership_locked(data);
+        self.ensure_player_nodes_locked(data);
         self.update_player_gold_locked(data, player_id);
         let node = data
             .state
@@ -1218,6 +1236,8 @@ impl App {
             node.building = Some(building);
             node.army = 0;
         }
+        // The set of city buildings (and their radii) may have changed.
+        data.city_membership_dirty = true;
         self.recompute_player_economy_locked(data, player_id);
         data.state.version += 1;
         self.save_state_locked(&mut data.state)?;
@@ -1337,9 +1357,12 @@ impl App {
                 affected.push(node_id.clone());
             }
         }
+        if !affected.is_empty() {
+            data.player_nodes_dirty = true;
+        }
 
+        data.state.building_cooldowns.insert(ready_silo_id.clone(), now);
         let player = data.state.players.get_mut(player_id).unwrap();
-        player.last_silo_fire_at = now;
         player.gold -= cost;
         self.recompute_player_economy_locked(data, player_id);
         data.state.version += 1;
@@ -1588,6 +1611,7 @@ impl App {
                 },
             );
         }
+        data.player_nodes_dirty = true;
         let now = now_ms();
         data.state.players.insert(
             player_id.clone(),
@@ -1603,8 +1627,6 @@ impl App {
                 gold_updated_at: now,
                 damage_reduction_percent: 0,
                 happiness_percent: 0,
-                last_silo_fire_at: 0,
-                last_sam_fire_at: 0,
             },
         );
         self.recompute_player_economy_locked(&mut data, &player_id);
@@ -1774,10 +1796,19 @@ impl App {
                 let damage = effective_flow as i64;
                 target_node.army -= damage;
                 if target_node.army < 0 {
+                    let had_building = target_node.building.is_some();
                     target_node.owner_id = Some(attack.owner_id.clone());
                     target_node.army = target_node.army.abs().max(1);
-                    // Destroy any building on a captured node.
+                    // Destroy any building on a captured node. Only a captured
+                    // node that actually held a building can change city
+                    // membership; ownership flips always change the
+                    // player-nodes index.
+                    if had_building {
+                        data.city_membership_dirty = true;
+                        data.state.building_cooldowns.remove(&attack.to_node_id);
+                    }
                     target_node.building = None;
+                    data.player_nodes_dirty = true;
                     if let Some(existing_attack) = data.state.attacks.get_mut(&attack_id) {
                         existing_attack.mode = "transfer".to_string();
                     }
@@ -2157,7 +2188,7 @@ impl App {
                 "damageReductionPercent": player.damage_reduction_percent,
                 "happinessPercent": player.happiness_percent
             })),
-            "buildStatus": self.current_build_status(),
+            "buildStatus": self.current_build_status(&mut data),
             "cityFeatures": {
                 "type": "FeatureCollection",
                 "features": self.city_features_locked(&data)
@@ -2341,6 +2372,9 @@ impl App {
             return Err("You can only connect from your own node.".to_string());
         }
         let immediate_targets = self.immediate_neighbor_targets_locked(&mut data, from_node_id)?;
+        // The repo may have been reloaded above; refresh caches before
+        // world_feature_locked consults them.
+        self.ensure_city_membership_locked(&mut data);
         let candidate_filter = if candidate_node_ids.is_empty() || candidate_node_ids.len() > 20_000 {
             None
         } else {
