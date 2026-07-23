@@ -1,5 +1,6 @@
-const APP_SHELL_CACHE = "new-england-four-app-v66";
-const DATA_CACHE = "new-england-four-data-v66";
+const APP_SHELL_CACHE = "new-england-four-app-v67";
+const DATA_CACHE = "new-england-four-data-v67";
+const DATA_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const APP_SHELL_FILES = [
   "/",
   "/openfreemap_viewer.html",
@@ -79,6 +80,37 @@ async function cacheFirst(request, cacheName) {
   return response;
 }
 
+async function cacheFirstWithTtl(request, cacheName, ttlMs) {
+  const cache = await caches.open(cacheName);
+  const cached = await cache.match(request);
+  if (cached) {
+    const cachedAt = Number(cached.headers.get("x-sw-cached-at") || 0);
+    if (cachedAt && Date.now() - cachedAt <= ttlMs) {
+      return cached;
+    }
+  }
+
+  try {
+    const response = await fetch(request);
+    if (response && response.ok) {
+      const headers = new Headers(response.headers);
+      headers.set("x-sw-cached-at", String(Date.now()));
+      const stamped = new Response(await response.clone().blob(), {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+      });
+      cache.put(request, stamped);
+    }
+    return response;
+  } catch (error) {
+    if (cached) {
+      return cached;
+    }
+    throw error;
+  }
+}
+
 self.addEventListener("fetch", (event) => {
   const request = event.request;
   if (request.method !== "GET") {
@@ -100,20 +132,24 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
+  if (url.pathname.startsWith("/vendor/")) {
+    event.respondWith(cacheFirst(request, APP_SHELL_CACHE));
+    return;
+  }
+
   if (isPreparedNodeRequest(url)) {
-    event.respondWith(cacheFirst(request, DATA_CACHE));
+    event.respondWith(cacheFirstWithTtl(request, DATA_CACHE, DATA_CACHE_TTL_MS));
     return;
   }
 
   if (url.pathname.endsWith("openfreemap_viewer.html")) {
-    event.respondWith(fetch(request, { cache: "no-store" }));
+    event.respondWith(networkFirst(request, APP_SHELL_CACHE));
     return;
   }
 
   if (
     url.pathname.endsWith("/metadata.json") ||
     url.pathname.endsWith("/tile_index.json") ||
-    url.pathname.endsWith("/build_status.json") ||
     url.pathname.endsWith("/region_manifest.json")
   ) {
     event.respondWith(networkFirst(request, APP_SHELL_CACHE));
