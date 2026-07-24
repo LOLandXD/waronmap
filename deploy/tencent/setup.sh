@@ -36,8 +36,8 @@ EMAIL="${1:-}"
 DOMAIN="${2:-waronmaps.com}"
 
 if [[ -z "$EMAIL" ]]; then
-  echo "Usage: sudo ./deploy/tencent/setup.sh your-email@example.com [domain.com]"
-  exit 1
+  echo "WARNING: No email provided. Certbot will register without email."
+  echo "Usage: sudo ./deploy/tencent/setup.sh [your-email@example.com] [domain.com]"
 fi
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -98,7 +98,13 @@ nginx -t
 systemctl restart nginx
 
 echo "==> Obtaining SSL certificate for $DOMAIN..."
-if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --redirect -m "$EMAIL"; then
+CERTBOT_ARGS=(--nginx -d "$DOMAIN" --non-interactive --agree-tos --redirect)
+if [[ -n "$EMAIL" ]]; then
+  CERTBOT_ARGS+=(-m "$EMAIL")
+else
+  CERTBOT_ARGS+=(--register-unsafely-without-email)
+fi
+if certbot "${CERTBOT_ARGS[@]}"; then
   echo "    Certificate installed."
 else
   echo "    WARNING: certbot failed. Make sure $DOMAIN's A record points to this server's public IP"
